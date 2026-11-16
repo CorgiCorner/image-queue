@@ -1,4 +1,5 @@
 import type {Storage} from '../storage/types';
+import {waitForLock} from '../storage/wait-for-lock';
 import type {JobSource,ClaimedJob,RunnerCapability,RunnerFailure,RunnerResult} from './job-source';
 export interface RunnableJob {id:string;capability:RunnerCapability}
 interface Lease {id:string;jobId:string;runnerId:string;expiresAt:number;startedAt?:number;state:'active'|'complete'|'failed'|'uncertain'}
@@ -10,9 +11,17 @@ export interface LocalSourceHooks<T extends RunnableJob> {
 /** One lock orders claims; leased work is never selected twice after an ambiguous run. */
 export class LocalJobSource<T extends RunnableJob> implements JobSource<T> {
  constructor(private store:Storage,private hooks:LocalSourceHooks<T>,private now=Date.now,private leaseMs=60000){}
+ /**
+  * Parallel workers contend for this lock routinely; wait rather than fail.
+  * Half the lease (30 s of 60 s): a heartbeat that starts 15 s after the last
+  * one and waits the full bound still lands 15 s before the lease expires.
+  * The holder can keep the lock for a while (queue helper and project writes
+  * each wait for their own locks), so a shorter bound would abort live work.
+  */
+ private claims<R>(work:()=>Promise<R>){return waitForLock(this.store,'local-runner-claims',work,this.leaseMs/2);}
  async claim(runnerId:string,capabilities:RunnerCapability[]):Promise<ClaimedJob<T>|null>{
   if(!runnerId.trim()||!capabilities.length)throw new Error('Runner identity and capabilities required');
-  return this.store.lock('local-runner-claims',async()=>{
+  return this.claims(async()=>{
    await this.recoverExpired();
    const leases=await this.store.list<Lease>('runner-leases');
    const excluded=new Set(leases.map(l=>l.jobId));
@@ -30,13 +39,13 @@ export class LocalJobSource<T extends RunnableJob> implements JobSource<T> {
   return lease;
  }
  async start(jobId:string,id:string){
-  await this.store.lock('local-runner-claims',async()=>{const l=await this.active(jobId,id);await this.store.put('runner-leases',id,{...l,startedAt:this.now()});});
+  await this.claims(async()=>{const l=await this.active(jobId,id);await this.store.put('runner-leases',id,{...l,startedAt:this.now()});});
  }
  async heartbeat(jobId:string,id:string){
-  await this.store.lock('local-runner-claims',async()=>{const l=await this.active(jobId,id);await this.store.put('runner-leases',id,{...l,expiresAt:this.now()+this.leaseMs});});
+  await this.claims(async()=>{const l=await this.active(jobId,id);await this.store.put('runner-leases',id,{...l,expiresAt:this.now()+this.leaseMs});});
  }
  async complete(jobId:string,id:string,result:RunnerResult){
-  await this.store.lock('local-runner-claims',async()=>{
+  await this.claims(async()=>{
    const l=await this.active(jobId,id);
    if(l.startedAt===undefined)throw new Error('Generation has not started');
    if(!/^[a-f0-9]{64}$/.test(result.blobKey)||!Number.isInteger(result.width)||result.width<1||!Number.isInteger(result.height)||result.height<1||result.mime!=='image/png')throw new Error('Invalid generated result');
@@ -44,7 +53,7 @@ export class LocalJobSource<T extends RunnableJob> implements JobSource<T> {
   });
  }
  async fail(jobId:string,id:string,error:RunnerFailure){
-  await this.store.lock('local-runner-claims',async()=>{const l=await this.active(jobId,id);await this.hooks.fail(jobId,error);await this.store.put('runner-leases',id,{...l,state:error.uncertain?'uncertain':'failed'});});
+  await this.claims(async()=>{const l=await this.active(jobId,id);await this.hooks.fail(jobId,error);await this.store.put('runner-leases',id,{...l,state:error.uncertain?'uncertain':'failed'});});
  }
  /** Caller must hold exclusive executor ownership before using this. */
  async recoverAfterRestart(){await this.recoverExpired(true);}
