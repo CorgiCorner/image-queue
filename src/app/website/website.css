@@ -38,7 +38,7 @@ main.public-site{margin:0;min-width:0;width:100%;padding:0}
 
 .site-setup,.site-agents{max-width:1240px;margin:auto;padding:76px 48px;border-top:1px solid var(--site-line)}
 .site-setup .site-section-heading p{max-width:580px;color:var(--site-muted);margin:20px 0 28px}
-.setup-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.public-site .setup-actions .site-button{height:auto;min-height:48px}.public-site .setup-prompt .setup-actions .site-button.setup-copy{background:transparent;border-color:#bcbec8;color:var(--site-ink)}.public-site .setup-copy:focus-visible{outline:2px solid var(--site-accent);outline-offset:5px;box-shadow:none}.public-site .setup-prompt .setup-actions .site-button.setup-copy:hover{background:#eeeeef}
+.setup-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.public-site .setup-actions .site-button{height:auto;min-height:48px}.public-site .setup-prompt .setup-actions .site-button.setup-copy{background:transparent!important;border-color:#bcbec8!important;color:var(--site-ink)!important}.public-site .setup-copy:focus-visible{outline:2px solid var(--site-accent);outline-offset:5px;box-shadow:none}.public-site .setup-prompt .setup-actions .site-button.setup-copy:hover{background:#eeeeef!important}
 .setup-prompt>p{max-width:680px;font-size:14px;color:var(--site-muted);margin:20px 0}
 .setup-prompt details{max-width:800px}.setup-prompt summary,.terminal-option summary{cursor:pointer;font-size:14px;font-weight:550;padding:14px 0}
 .setup-prompt pre{max-height:400px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:20px;background:#efefed;color:var(--site-ink);font-size:13px;line-height:1.7;border-radius:10px}
