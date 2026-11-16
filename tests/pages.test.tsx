@@ -36,7 +36,7 @@ it("renders route entry points", async () => {
 });
 it("renders the standalone settings and public website routes", async () => {
   expect((await Settings({})).props).toMatchObject({ settingsPage: true, initialState: { projects: [{ id: "sample-project" }], jobs: [] } });
-  expect((await Website()).props.className).toBe("public-site");
+  expect(renderToStaticMarkup(await Website())).toContain('class="public-site"');
 });
 
 it.each(["localhost:3215", "127.0.0.1:3391", "[::1]:3215"])("renders the local site at %s without loading private workspace state", async (host) => {

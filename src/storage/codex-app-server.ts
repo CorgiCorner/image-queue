@@ -42,7 +42,7 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
    const message=JSON.parse(line);
    if(message.id!==undefined && message.method){send({id:message.id,error:{code:-32601,message:'Interactive requests are disabled'}});fail(new Error('Unexpected Codex permission or tool request'));return;}
    const waiter=pending.get(message.id);
-   if(waiter){pending.delete(message.id);message.error?waiter.reject(new Error(codexFailureMessage(JSON.stringify(message.error)))):waiter.resolve(message.result);return;}
+   if(waiter){pending.delete(message.id);message.error?waiter.reject(new UserFacingError(codexFailureMessage(JSON.stringify(message.error)))):waiter.resolve(message.result);return;}
    if(message.params?.threadId!==threadId)return;
    const item=message.params?.item;
    if(message.method==='item/completed' && item){
@@ -83,12 +83,12 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
   await turn;
   if(fatal)throw fatal;
   if(options.signal.aborted)throw new Error('Generation interrupted; result is uncertain');
-  if(!image)throw new Error('Codex did not return a generated image');
-  if(image.revisedPrompt!==options.request.prompt)throw new Error('Generator changed the requested prompt');
-  if(image.inputImages.length!==options.request.references.length)throw new Error('Generator omitted reference images');
+  if(!image)throw new UserFacingError('Codex did not return a generated image. Check the attempt before retrying.');
+  if(image.revisedPrompt!==options.request.prompt)throw new UserFacingError('Generator changed the requested prompt. The result was not published; inspect the attempt before retrying.');
+  if(image.inputImages.length!==options.request.references.length)throw new UserFacingError('Generator omitted reference images. The result was not published; inspect the attempt before retrying.');
   for(let i=0;i<image.inputImages.length;i++){
    const reference=options.request.references[i];
-   if(await realpath(image.inputImages[i].path)!==await realpath(reference)||image.inputImages[i].sha256!==createHash('sha256').update(await readFile(reference)).digest('hex'))throw new Error('Generator reference evidence does not match the request');
+   if(await realpath(image.inputImages[i].path)!==await realpath(reference)||image.inputImages[i].sha256!==createHash('sha256').update(await readFile(reference)).digest('hex'))throw new UserFacingError('Generator reference evidence does not match the request. The result was not published; inspect the attempt before retrying.');
   }
   const root=await realpath(path.join(process.env.CODEX_HOME??path.join(os.homedir(),'.codex'),'generated_images',threadId));
   const actual=await realpath(image.savedPath);

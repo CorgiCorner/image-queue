@@ -2,7 +2,7 @@ import type {Storage} from '../storage/types';
 export type LocalAttempt = {
  id:string; jobId:string; state:'prepared'|'running'|'succeeded'|'uncertain';
  createdAt:string; updatedAt:string; model:string; prompt:string; references:string[];
- processId?:number; startedAt?:string; error?:string;
+ processId?:number; startedAt?:string; error?:string; artifactDirectory?:string;
 };
 /** Persisted before launch. Contains no provider credentials or claim token. */
 export async function prepareLocalAttempt(store:Storage,input:Pick<LocalAttempt,'jobId'|'model'|'prompt'|'references'>) {
@@ -32,4 +32,15 @@ export async function recoverLocalAttempts(store:Storage) {
   if(a.state==='prepared'||a.state==='running')recovered.push(await updateLocalAttempt(store,a.id,'uncertain'));
  }
  return recovered;
+}
+
+/** Save only an application-owned summary; raw provider output never belongs in status. */
+export async function recordLocalAttemptFailure(store: Storage, id: string, error: string, artifactDirectory: string) {
+ return store.lock(`local-attempt-record-${id}`, async () => {
+  const attempt = await store.get<LocalAttempt>('local-attempts', id);
+  if (!attempt || attempt.state === 'succeeded') throw new Error('No unfinished generation attempt');
+  const updated = {...attempt, state: 'uncertain' as const, error, artifactDirectory, updatedAt: new Date().toISOString()};
+  await store.put('local-attempts', id, updated);
+  return updated;
+ });
 }

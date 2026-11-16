@@ -1,6 +1,6 @@
 {
   "name": "image-queue",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first image queue and generation workspace",
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3215",
@@ -16,7 +16,8 @@
     "benchmark": "tsx scripts/benchmark.ts",
     "build:mcp": "pnpm check:boundaries && pnpm build:mcp-views && esbuild src/mcp/stdio.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/mcp.mjs",
     "check:boundaries": "tsx scripts/check-boundaries.ts",
-    "build:mcp-views": "tsx scripts/build-mcp-views.ts"
+    "build:mcp-views": "tsx scripts/build-mcp-views.ts",
+    "build:website": "node scripts/build-website.mjs"
   },
   "license": "Apache-2.0",
   "packageManager": "pnpm@10.28.2",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — 2026-11-16
+
+- Publish the product website separately on GitHub Pages, with support for a custom domain.
+- Report known prompt, reference and transparency validation failures directly in queue status.
+
+- Preserve generated files and safe failure summaries when local validation or delivery fails, so interrupted results can be inspected without generating duplicates.
+
 ## 0.1.0 — 2026-11-16
 
 First local release.
