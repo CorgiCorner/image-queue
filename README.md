@@ -1,7 +1,7 @@
 # image-queue: local AI image generation queue and gallery
 
 <p>
-  <img src="public/brand/readme-banner.svg" width="900" alt="image-queue: a local AI image generation queue and gallery for Codex, OpenAI and MCP agents" />
+  <img src="public/brand/readme-banner.webp" width="900" alt="image-queue: a local AI image generation queue and gallery for Codex, OpenAI and MCP agents" />
 </p>
 
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-7770e8?style=flat&labelColor=292934)](LICENSE)
