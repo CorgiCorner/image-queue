@@ -44,6 +44,33 @@ export function workerHealth(
 
 export const workersOfflineMessage = "Workers are offline. Requests will wait in the queue.";
 
+export interface QueueWaitState {
+  paused: boolean;
+  /** Set when the queue stopped on an error and needs attention. */
+  blockedReason?: string;
+  /** True when a verified quota reset will resume a blocked queue on its own. */
+  resumesAutomatically?: boolean;
+  /** True only when configured workers have stopped sending heartbeats. */
+  notResponding?: boolean;
+}
+
+/**
+ * Explain why a queued request is not generating, or return undefined when the queue can take it.
+ * A blocked queue is reported as stopped, never as offline workers.
+ */
+export function queueWaitNotice(state: QueueWaitState, subject: "requests" | "version" = "requests", locales?: string | string[], timeZone?: string) {
+  const waits = subject === "version" ? "This version will wait" : "Requests will wait";
+  if (state.blockedReason) {
+    const reason = workerStatusMessage(state.blockedReason, locales, timeZone);
+    return state.resumesAutomatically
+      ? `Queue stopped. ${reason} ${waits} in the queue and resume after the limit resets.`
+      : `Queue stopped — action needed. ${reason} ${waits} until you resume the queue.`;
+  }
+  if (state.paused) return `Workers are turned off. ${waits} in the queue.`;
+  if (state.notResponding) return `Workers are offline. ${waits} in the queue.`;
+  return undefined;
+}
+
 /** Present persisted quota reset timestamps in the viewer's locale and timezone. */
 export function workerStatusMessage(message: string, locales?: string | string[], timeZone?: string) {
   return message.replace(/Resets at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\./g, (match, timestamp) => {

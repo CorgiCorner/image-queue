@@ -154,7 +154,12 @@ function render(result: { content?: unknown[] }) {
     ? `${statusLabel} · Worker slot ${job.workerSlot}`
     : statusLabel;
   status.textContent = job.trashedAt ? "In Trash" : job.error ? `${label}: ${job.error}` : label;
-  if (workerNotice) workerNotice.hidden = job.status !== "queued" || job.workersOffline !== true || Boolean(job.trashedAt);
+  if (workerNotice) {
+    const notice = typeof job.queueNotice === "string" && job.queueNotice.length <= 2000 ? job.queueNotice
+      : job.workersOffline === true ? workersOfflineMessage : "";
+    if (notice) workerNotice.textContent = notice;
+    workerNotice.hidden = job.status !== "queued" || !notice || Boolean(job.trashedAt);
+  }
   if (source) {
     const provider = providerLabels.get(job.provider) ?? "Provider API";
     const model = typeof job.model === "string" && job.model.length <= 200 ? job.model : "";

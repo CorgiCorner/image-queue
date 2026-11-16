@@ -9,7 +9,7 @@ import { annotationSelection } from "@/core/annotation";
 import { aspectRatios, resolveModelSize, type SizeProfile } from "@/core/size-intent";
 import { visibleJobs } from "@/core/retention";
 import { MAX_TAG_LENGTH, tagCounts } from "@/core/tags";
-import { defaultGenerationSource, jobCounts, pulseIsFresh, workerHealth, workersOfflineMessage, workerStatusMessage } from "@/core/workspace-state";
+import { defaultGenerationSource, jobCounts, pulseIsFresh, queueWaitNotice, workerHealth, workerStatusMessage } from "@/core/workspace-state";
 import { modelSizes, sizeLabel, queueSizes, ratioFirstLabel, closestAspectSize } from "@/core/model-options";
 import { SelectInput } from "./select-input";
 import { ProjectFolderSettings } from "./project-folder-settings";
@@ -745,7 +745,10 @@ export function Workspace({
   const workersPaused = data.localRunner ? (data.localRunner.paused ?? data.localRunner.enabled === 0) : data.pool.workers === 0;
   const slotsWithoutHeartbeat = Array.from({ length: data.pool.workers }, (_, index) => index + 1)
     .filter(slot => !data.pulses.some(pulse => pulse.slot === slot)).length;
-  const workersUnavailable = workersPaused || Boolean(data.localRunner?.blockedReason) || health === "Workers not responding";
+  const queueWaitState = { paused: workersPaused, blockedReason: data.localRunner?.blockedReason, resumesAutomatically: Boolean(data.localRunner?.resumeAt), notResponding: health === "Workers not responding" };
+  const queueRequestsNotice = queueWaitNotice(queueWaitState);
+  const queueVersionNotice = queueWaitNotice(queueWaitState, "version");
+  const workersUnavailable = queueRequestsNotice !== undefined;
   const connectedProviders = [
     ...new Set(data.models.filter(entry => entry.provider === "openai").map((entry) => entry.provider)),
   ];
@@ -2652,7 +2655,7 @@ export function Workspace({
                 </Button>
                 <WorkerAlert enabled={source === "queue" && loaded} unavailable={workersUnavailable}
                   instantHeight={priorComposerSource.current !== source}
-                  message={workersPaused ? "Workers are turned off. Requests will wait in the queue." : workersOfflineMessage}
+                  message={queueRequestsNotice ?? ""}
                   manageHref="/settings#worker-pool" />
                 <div className="composer-footer">
                   <div className="composer-options">
@@ -3330,7 +3333,7 @@ export function Workspace({
                   </div>
                   <WorkerAlert enabled={source === "queue"} unavailable={workersUnavailable}
                     instantHeight={priorComposerSource.current !== source}
-                    message={`${workersPaused ? "Workers are turned off." : "Workers are offline."} This version will wait in the queue.`}
+                    message={queueVersionNotice ?? ""}
                     manageHref="/settings#worker-pool" />
                   {correctionNeedsConnection ? <>
                     <p className="text-muted-foreground" role="status">Connect OpenAI to edit this image with your API key.</p>

@@ -399,6 +399,11 @@ it("clears the worker warning when the pool responds or the job starts", async (
   render({ workersOffline: true });
   render({ status: "running", workersOffline: true });
   expect(notice.hidden).toBe(true);
+  render({ workersOffline: false, queueNotice: "Queue stopped — action needed. Sign in to Codex. Requests will wait until you resume the queue." });
+  expect(notice.hidden).toBe(false);
+  expect(notice.textContent).toBe("Queue stopped — action needed. Sign in to Codex. Requests will wait until you resume the queue.");
+  render({ workersOffline: false });
+  expect(notice.hidden).toBe(true);
   await app.onteardown();
 });
 

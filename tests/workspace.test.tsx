@@ -2167,6 +2167,18 @@ it("explains intentionally paused workers in the composer and next-version panel
   expect(panelLink.getAttribute("href")).toBe("/settings#worker-pool");
 });
 
+it("explains a stopped queue instead of offline workers in the composer and next-version panel", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ ...structuredClone(state), localRunner: { mode: "local", paused: false, enabled: 1, running: 0, desiredWorkers: 1, blockedReason: "Sign in to Codex." } }),
+  })));
+  render(<Workspace initialProject="project" />);
+  await screen.findByText("Queue stopped — action needed. Sign in to Codex. Requests will wait until you resume the queue.");
+  fireEvent.click(screen.getByRole("button", { name: "Open IMG-first" }));
+  expect(await screen.findByText("Queue stopped — action needed. Sign in to Codex. This version will wait until you resume the queue.")).toBeTruthy();
+  expect(screen.queryByText(/Workers are offline/)).toBeNull();
+});
+
 it("marks only the current sidebar destination as the current page", async () => {
   await ready();
   const currentPage = () => [...document.querySelectorAll("aside [aria-current=page]")];

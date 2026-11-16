@@ -63,3 +63,28 @@ it("formats quota reset timestamps in the viewer timezone without changing other
   expect(workerStatusMessage("Sign in to Codex.")).toBe("Sign in to Codex.");
   expect(workerStatusMessage("Resets at unknown.")).toBe("Resets at unknown.");
 });
+
+describe("queue wait notice", () => {
+  it("reports a stopped queue as stopped, not as offline workers", async () => {
+    const { queueWaitNotice } = await import("../src/core/workspace-state");
+    const blocked = { paused: false, blockedReason: "Sign in to Codex.", notResponding: true };
+    expect(queueWaitNotice(blocked)).toBe("Queue stopped — action needed. Sign in to Codex. Requests will wait until you resume the queue.");
+    expect(queueWaitNotice(blocked, "version")).toBe("Queue stopped — action needed. Sign in to Codex. This version will wait until you resume the queue.");
+    expect(queueWaitNotice({ ...blocked, paused: true })).toContain("Queue stopped — action needed.");
+    for (const subject of ["requests", "version"] as const) expect(queueWaitNotice(blocked, subject)).not.toContain("offline");
+  });
+  it("says a quota stop resumes on its own and shows the reset in the viewer timezone", async () => {
+    const { queueWaitNotice } = await import("../src/core/workspace-state");
+    const message = queueWaitNotice({ paused: false, blockedReason: "Codex limit reached. Resets at 2026-11-17T08:00:00.000Z.", resumesAutomatically: true }, "requests", "en-GB", "Europe/Warsaw");
+    expect(message).toMatch(/^Queue stopped\. Codex limit reached\. Resets at .*09:00\. Requests will wait in the queue and resume after the limit resets\.$/);
+  });
+  it("keeps turned off and offline for paused and unresponsive workers only", async () => {
+    const { queueWaitNotice, workersOfflineMessage } = await import("../src/core/workspace-state");
+    expect(queueWaitNotice({ paused: true, notResponding: true })).toBe("Workers are turned off. Requests will wait in the queue.");
+    expect(queueWaitNotice({ paused: true }, "version")).toBe("Workers are turned off. This version will wait in the queue.");
+    expect(queueWaitNotice({ paused: false, notResponding: true })).toBe(workersOfflineMessage);
+    expect(queueWaitNotice({ paused: false, notResponding: true }, "version")).toBe("Workers are offline. This version will wait in the queue.");
+    expect(queueWaitNotice({ paused: false })).toBeUndefined();
+    expect(queueWaitNotice({ paused: false, blockedReason: "" })).toBeUndefined();
+  });
+});

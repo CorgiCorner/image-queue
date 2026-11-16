@@ -392,11 +392,24 @@ it("registers optional HTML resources only for a capable host", async () => {
       expect(response.isError, JSON.stringify(response.content)).toBeFalsy();
       return JSON.parse((response.content as { text: string }[])[0].text);
     };
-    expect(await readWorkerState()).toMatchObject({ status: "queued", workersOffline: true });
-    await api.store.put("pulses", "1", {
-      slot: 1, workerId: "test-worker", lastWake: new Date().toISOString(),
-    });
-    expect(await readWorkerState()).toMatchObject({ status: "queued", workersOffline: false });
+    // Local workers send no heartbeats, so their notice follows the runner's own state.
+    expect(await readWorkerState()).toMatchObject({ status: "queued", workersOffline: false, queueNotice: "Workers are turned off. Requests will wait in the queue." });
+    await api.store.put("settings", "local-runner", { workers: 1, paused: false, blockedReason: "Sign in to Codex." });
+    const blocked = await readWorkerState();
+    expect(blocked).toMatchObject({ workersOffline: false, queueNotice: "Queue stopped — action needed. Sign in to Codex. Requests will wait until you resume the queue." });
+    await api.store.put("settings", "local-runner", { workers: 1, paused: false });
+    expect(await readWorkerState()).not.toHaveProperty("queueNotice");
+    process.env.IMAGE_QUEUE_EXECUTOR = "scheduled";
+    try {
+      expect(await readWorkerState()).toMatchObject({ status: "queued", workersOffline: true, queueNotice: "Workers are offline. Requests will wait in the queue." });
+      await api.store.put("pulses", "1", {
+        slot: 1, workerId: "test-worker", lastWake: new Date().toISOString(),
+      });
+      expect(await readWorkerState()).toMatchObject({ status: "queued", workersOffline: false });
+      expect(await readWorkerState()).not.toHaveProperty("queueNotice");
+    } finally {
+      delete process.env.IMAGE_QUEUE_EXECUTOR;
+    }
     expect(await call("get_job", { id: queued.id })).not.toHaveProperty("workersOffline");
     const result = await appClient.callTool({
       name: "show_job",

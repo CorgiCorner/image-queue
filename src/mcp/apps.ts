@@ -1,6 +1,6 @@
 import { UserFacingError } from "../core/user-facing-error";
 import { MAX_WORKERS, poolConfig, type Pulse } from "../core/pool";
-import { workerHealth } from "../core/workspace-state";
+import { queueWaitNotice, workerHealth } from "../core/workspace-state";
 import { configuration } from "../core/config";
 import { prepareCorrection } from "../core/prepare-correction";
 import { imageViewHtml } from "./views/image-html";
@@ -74,12 +74,22 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
       async ({ id }) => {
         const job = (await refreshedJobs()).find((candidate) => candidate.id === id);
         let workersOffline = false;
+        let queueNotice: string | undefined;
         let workerSlot: number | undefined;
         if (job?.source === "queue" && (job.status === "queued" || (job.status === "running" && job.claim))) {
           const store = await storage();
           const pulses = await store.list<Pulse>("pulses");
           if (job.status === "queued") {
-            workersOffline = workerHealth(await poolConfig(store), pulses) === "Workers not responding";
+            if (configuration("EXECUTOR") === "scheduled") {
+              const pool = await poolConfig(store);
+              workersOffline = workerHealth(pool, pulses) === "Workers not responding";
+              queueNotice = queueWaitNotice({ paused: pool.workers === 0, notResponding: workersOffline });
+            } else {
+              // Local workers send no heartbeats; report the runner's own paused or stopped state instead.
+              const { executionStatus } = await import("./execution-status");
+              const execution = await executionStatus(store);
+              if ("paused" in execution) queueNotice = queueWaitNotice({ paused: execution.paused, blockedReason: execution.blockedReason, resumesAutomatically: Boolean(execution.resumeAt) });
+            }
           } else {
             const matches = pulses.filter(pulse => pulse.workerId === job.claim?.owner &&
               Number.isInteger(pulse.slot) && pulse.slot >= 1 && pulse.slot <= MAX_WORKERS);
@@ -87,7 +97,7 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
           }
         }
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(job ? { ...job, workersOffline, workerSlot } : { error: "Not found" }) }],
+          content: [{ type: "text" as const, text: JSON.stringify(job ? { ...job, workersOffline, ...(queueNotice ? { queueNotice } : {}), workerSlot } : { error: "Not found" }) }],
         };
       },
     );
