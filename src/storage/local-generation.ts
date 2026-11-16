@@ -31,9 +31,9 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
     const actual=JSON.parse(await readFile(receipt,'utf8'));
     const attached=actual.attachment;
     if(actual.prompt!==job.prompt||JSON.stringify(actual.referencePaths)!==JSON.stringify(job.references)||
-      (job.references.length?attached?.parameter!=='referenced_image_paths'||JSON.stringify(attached.value)!==JSON.stringify(job.references):attached!==null))throw new Error('Actual generation receipt does not match requested prompt and references');
+      (job.references.length?attached?.parameter!=='referenced_image_paths'||JSON.stringify(attached.value)!==JSON.stringify(job.references):attached!==null))throw new UserFacingError('Generation receipt does not match the requested prompt and references. The result was retained for inspection; it was not published.');
     const fitted=await fitImage(new Uint8Array(await readFile(output.path)),job);
-    if(job.transparent && !(await hasTransparentPixels(fitted.bytes)))throw new Error('Generated image is not transparent');
+    if(job.transparent && !(await hasTransparentPixels(fitted.bytes)))throw new UserFacingError('Generated image is not transparent. The result was retained for inspection; it was not published.');
     const blobKey=await hash(fitted.bytes);await store.putBlob(blobKey,fitted.bytes,'image/png');
     await writeFile(path.join(attempt.directory,'provenance.md'),`Prompt: ${job.prompt}\nWorker model: ${job.model}\nGenerated: ${new Date().toISOString()}\n`,{mode:0o600});
     for(const name of ['original.png','receipt.json','provenance.md','events.jsonl','stderr.log']){
@@ -46,11 +46,16 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
    } catch(error) {
     // A failed validation or publication must not discard an image already produced.
     const message=error instanceof UserFacingError ? error.message : 'Local generation did not finish validation. Inspect the retained attempt before retrying.';
+    let retainedDirectory=attempt.archive;
     for(const name of ['original.png','receipt.json','provenance.md','events.jsonl','stderr.log']) {
      try {await copyFile(path.join(attempt.directory,name),path.join(attempt.archive,name));}
-     catch(copyError) {if((copyError as NodeJS.ErrnoException).code!=='ENOENT')throw copyError;}
+     catch(copyError) {
+      // Preserve the original failure even if the durable archive is unavailable.
+      // The private working directory remains intact and is recorded for recovery.
+      if((copyError as NodeJS.ErrnoException).code!=='ENOENT'){retainedDirectory=attempt.directory;break;}
+     }
     }
-    await recordLocalAttemptFailure(store,attempt.id,message,attempt.archive);
+    await recordLocalAttemptFailure(store,attempt.id,message,retainedDirectory);
     throw error;
    }
   },
