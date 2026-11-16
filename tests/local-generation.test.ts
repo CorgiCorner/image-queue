@@ -63,6 +63,8 @@ it('retains the working directory and original failure when archiving is unavail
  const attempt=(await store.list<any>('local-attempts'))[0];
  expect(attempt.state).toBe('uncertain');expect(attempt.error).toContain('receipt');
  expect(attempt.artifactDirectory).toContain('image-queue-generation-');
+ await generation.uncertain(job.id,new Error('later cleanup'));
+ expect((await store.list<any>('local-attempts'))[0].artifactDirectory).toBe(attempt.artifactDirectory);
  roots.push(attempt.artifactDirectory);
  expect((await readFile(join(attempt.artifactDirectory,'original.png'))).length).toBeGreaterThan(0);
 });

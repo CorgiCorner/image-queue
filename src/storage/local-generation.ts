@@ -62,8 +62,8 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
   async uncertain(jobId:string,error?:unknown) {
    const a=attempts.get(jobId);
    if(a){
-    const current=await store.get<{state:string;error?:string}>('local-attempts',a.id);
-    if(current?.state!=='succeeded')await recordLocalAttemptFailure(store,a.id,current?.error ?? (error instanceof UserFacingError ? error.message : 'Local delivery did not complete. Inspect the retained result before retrying.'),a.archive);
+    const current=await store.get<{state:string;error?:string;artifactDirectory?:string}>('local-attempts',a.id);
+    if(current?.state!=='succeeded')await recordLocalAttemptFailure(store,a.id,current?.error ?? (error instanceof UserFacingError ? error.message : 'Local delivery did not complete. Inspect the retained result before retrying.'),current?.artifactDirectory ?? a.archive);
    }
    attempts.delete(jobId);
   },
