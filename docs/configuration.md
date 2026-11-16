@@ -161,3 +161,17 @@ For an offline upgrade from legacy directory locks, first stop every application
 ### Agent recovery
 
 MCP job responses include `execution` (runner state, stop reason, affected job and next action) and, for failed jobs, `recovery`. Do not treat a successful MCP call as successful image generation. Inspect the job status and error. For a pre-generation reference validation block, repair or convert the references and submit one corrected request automatically within the original user request. Check whether a corrected replacement already exists first. Never blindly retry unchanged inputs. `uncertain` means an image may already have been generated: inspect the existing result and obtain acknowledgement before a potentially duplicate generation. A deliberately paused queue remains paused until the user resumes it.
+
+### GitHub Pages
+
+`pnpm build:website` builds only the public product page into `dist/website`.
+It contains no dashboard routes, API endpoints or user data. The default base
+path is `/image-queue`; use `WEBSITE_BASE_PATH='' pnpm build:website` for a
+custom domain at its root. Both builds share the same website components.
+
+Enable GitHub Actions as the repository's Pages source. The `Public website`
+workflow deploys the static output and reads the base path from Pages settings.
+Configure a custom domain in repository Settings → Pages before changing DNS.
+For a subdomain, point its CNAME to `corgicorner.github.io`, without a path.
+Keep HTTPS enforcement enabled once GitHub has issued its certificate.
+This hosts the product website; running the queue still requires the local app.
