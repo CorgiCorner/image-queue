@@ -23,7 +23,7 @@ export function SetupPrompt() {
   return <div className="setup-prompt">
     <div className="setup-actions">
       <a className="site-button" href={setupLink}>Set up with ChatGPT <ArrowUpRight size={18} /></a>
-      <CopyButton value={setupPrompt} label="Copy setup prompt" size="default" variant="outline" className="setup-copy" copiedChildren="Copied" onSuccess={()=>setCopyFailed(false)} onError={()=>setCopyFailed(true)}>Copy setup prompt</CopyButton>
+      <CopyButton value={setupPrompt} label="Copy setup prompt" size="default" variant="outline" className="site-button setup-copy" copiedChildren="Copied" onSuccess={()=>setCopyFailed(false)} onError={()=>setCopyFailed(true)}>Copy setup prompt</CopyButton>
     </div>
     <p>Opens a draft in the desktop app. Choose local Work or Codex, review the prompt, then press Send. You’ll approve the setup steps. Local access depends on your plan and workspace settings.</p>
     <details><summary>Read the setup prompt</summary><pre>{setupPrompt}</pre></details>
