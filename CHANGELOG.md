@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 — Unreleased
+
+- Preserve generated files and safe failure summaries when local validation or delivery fails, so interrupted results can be inspected without generating duplicates.
+
 ## 0.1.0 — 2026-11-16
 
 First local release.

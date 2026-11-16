@@ -6,7 +6,7 @@ export interface ExecutorGeneration<T extends ExecutorJob> {
  /** Commit the attempt before the process is launched. */
  prepare(job:T):Promise<void>;
  published?(jobId:string):Promise<void>;
- uncertain?(jobId:string):Promise<void>;
+ uncertain?(jobId:string, error?:unknown):Promise<void>;
  generate(job:T,signal:AbortSignal):Promise<RunnerResult>;
 }
 /** Binds scheduling to the same source contract used by a future remote runner. */
@@ -47,7 +47,7 @@ export function createLocalExecutor<T extends ExecutorJob>(options:{
    await options.generation.published?.(work.id);
   },
   uncertain:async(work,error)=>{
-   await options.generation.uncertain?.(work.id);
+   await options.generation.uncertain?.(work.id,error);
    await options.source.fail(work.id,work.claim.leaseId,{code:'execution_interrupted',message:error instanceof UserFacingError ? error.message : 'Generation did not complete locally. Verify the result before retrying.',uncertain:true});
   },
   report:options.report,blocked:options.blocked,

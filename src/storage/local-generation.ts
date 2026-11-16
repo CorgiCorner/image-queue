@@ -3,9 +3,10 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 import type {Storage} from './types';
 import {runCodexAppServer} from './codex-app-server';
-import {prepareLocalAttempt,updateLocalAttempt} from '../core/local-worker-attempt';
+import {prepareLocalAttempt,updateLocalAttempt,recordLocalAttemptFailure} from '../core/local-worker-attempt';
 import {fitImage} from '../sources/image-fit';
 import {hasTransparentPixels} from '../sources/image-opacity';
+import {UserFacingError} from '../core/user-facing-error';
 import {hash} from '../core/schema';
 import type {RunnerResult} from '../core/job-source';
 export interface LocalGenerationJob {
@@ -42,9 +43,25 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
     await store.put('generation-artifacts',job.id,{image:path.join(attempt.archive,'fitted.png'),receipt:path.join(attempt.archive,'receipt.json'),provenance:path.join(attempt.archive,'provenance.md')});
     // Success is recorded only after the source accepts publication.
     return {blobKey,width:job.width,height:job.height,mime:'image/png'};
-   } catch(error) {await updateLocalAttempt(store,attempt.id,'uncertain');throw error;}
+   } catch(error) {
+    // A failed validation or publication must not discard an image already produced.
+    const message=error instanceof UserFacingError ? error.message : 'Local generation did not finish validation. Inspect the retained attempt before retrying.';
+    for(const name of ['original.png','receipt.json','provenance.md','events.jsonl','stderr.log']) {
+     try {await copyFile(path.join(attempt.directory,name),path.join(attempt.archive,name));}
+     catch(copyError) {if((copyError as NodeJS.ErrnoException).code!=='ENOENT')throw copyError;}
+    }
+    await recordLocalAttemptFailure(store,attempt.id,message,attempt.archive);
+    throw error;
+   }
   },
-  async uncertain(jobId:string) {const a=attempts.get(jobId);if(a){const current=await store.get<{state:string}>('local-attempts',a.id);if(current?.state==='running'||current?.state==='prepared')await updateLocalAttempt(store,a.id,'uncertain');}attempts.delete(jobId);},
+  async uncertain(jobId:string,error?:unknown) {
+   const a=attempts.get(jobId);
+   if(a){
+    const current=await store.get<{state:string;error?:string}>('local-attempts',a.id);
+    if(current?.state!=='succeeded')await recordLocalAttemptFailure(store,a.id,current?.error ?? (error instanceof UserFacingError ? error.message : 'Local delivery did not complete. Inspect the retained result before retrying.'),a.archive);
+   }
+   attempts.delete(jobId);
+  },
   async published(jobId:string) {const a=attempts.get(jobId);if(a){await updateLocalAttempt(store,a.id,'succeeded');await rm(a.directory,{recursive:true,force:true});}attempts.delete(jobId);},
  };
 }
