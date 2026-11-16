@@ -4,6 +4,9 @@ const store=new FileStorage(root);
 try {
  await store.lock('crash-check',async()=>{
   process.stdout.write('ACQUIRED\n');
-  if(action==='hold')await new Promise(()=>setInterval(()=>{},1000));
+  if(action==='hold')await new Promise<void>(resolve=>{
+   const keepAlive=setInterval(()=>{},1000);
+   process.once('message',()=>{clearInterval(keepAlive);resolve();});
+  });
  });
 } catch(error) {process.stdout.write('BUSY\n');process.exitCode=2;}

@@ -8,7 +8,7 @@ import {FileStorage} from '../src/storage/fs';
 const roots:string[]=[];const children:ChildProcess[]=[];
 afterEach(async()=>{for(const child of children.splice(0)){if(child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await once(child,'exit');}}await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
 async function root(){const p=await mkdtemp(join(tmpdir(),'iq-lock-recovery-'));roots.push(p);return p;}
-function run(root:string,action:string){const c=spawn(process.execPath,['--import','tsx',resolve('tests/file-lock-process-fixture.ts'),root,action],{stdio:['ignore','pipe','pipe']});children.push(c);return c;}
+function run(root:string,action:string){const c=spawn(process.execPath,['--import','tsx',resolve('tests/file-lock-process-fixture.ts'),root,action],{stdio:['ignore','pipe','pipe','ipc']});children.push(c);return c;}
 function output(c:ChildProcess){return new Promise<string>((res,rej)=>{let text='';c.stdout!.on('data',v=>{text+=v;if(text.includes('\n'))res(text.trim());});c.on('error',rej);c.on('exit',()=>{if(!text)rej(Error('Child exited without lock result'));});});}
 it('releases a process lock after SIGKILL without stealing it while alive',async()=>{
  const p=await root();const owner=run(p,'hold');expect(await output(owner)).toBe('ACQUIRED');
@@ -29,5 +29,7 @@ it('permits only one of two simultaneous successors after a crash',async()=>{
  const p=await root();const owner=run(p,'hold');expect(await output(owner)).toBe('ACQUIRED');
  owner.kill('SIGKILL');await once(owner,'exit');
  const a=run(p,'hold'),b=run(p,'hold');
- expect((await Promise.all([output(a),output(b)])).sort()).toEqual(['ACQUIRED','BUSY']);
+ const results=await Promise.all([output(a),output(b)]);
+ expect(results.sort()).toEqual(['ACQUIRED','BUSY']);
+ for(const child of [a,b])if(child.connected)child.send('release');
 },15000);
