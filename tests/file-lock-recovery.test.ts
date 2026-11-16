@@ -30,6 +30,7 @@ it('permits only one of two simultaneous successors after a crash',async()=>{
  owner.kill('SIGKILL');await once(owner,'exit');
  const a=run(p,'hold'),b=run(p,'hold');
  const results=await Promise.all([output(a),output(b)]);
- expect(results.sort()).toEqual(['ACQUIRED','BUSY']);
- for(const child of [a,b])if(child.connected)child.send('release');
+ expect([...results].sort()).toEqual(['ACQUIRED','BUSY']);
+ const winner=[a,b][results.indexOf('ACQUIRED')];
+ await new Promise<void>((resolve,reject)=>winner.send('release',error=>error?reject(error):resolve()));
 },15000);
