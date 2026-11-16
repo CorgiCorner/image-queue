@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 — 2026-11-16
+
+- Keep the local queue running when several images generate at once. Workers, page loads and agents now wait briefly for a busy storage lock instead of stopping the queue and marking the image as uncertain.
+- Say that the queue is stopped and waiting to be resumed when local execution is blocked, instead of reporting that workers are offline. The MCP job view shows the same state.
+- Replace the README banner.
+
 ## 0.1.1 — 2026-11-16
 
 - Publish the product website separately on GitHub Pages, with support for a custom domain.
