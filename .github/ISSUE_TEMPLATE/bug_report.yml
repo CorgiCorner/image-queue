@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible problem in image-queue.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: image-queue version or commit
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and version
+      placeholder: macOS 27.0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Processor architecture
+      options:
+        - Apple silicon (arm64)
+        - Intel / AMD (x64)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex CLI version (for Codex generation)
+      description: Run codex --version. Do not include keys, login files or tokens.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps, expected result and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or safe error details
+      description: Remove private prompts, file paths and credentials before submitting.

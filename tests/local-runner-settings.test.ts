@@ -1,0 +1,2 @@
+import {expect,it} from 'vitest';import{MemoryStorage}from'../src/storage/memory';import{readLocalRunnerSettings}from'../src/core/local-runner-settings';
+it('validates persisted worker count and blocked status',async()=>{const s=new MemoryStorage();expect(await readLocalRunnerSettings(s)).toBeUndefined();await s.put('settings','local-runner',{workers:1,blockedReason:'Check result'});expect((await readLocalRunnerSettings(s))?.workers).toBe(1);await s.put('settings','local-runner',{workers:50});await expect(readLocalRunnerSettings(s)).rejects.toThrow();});

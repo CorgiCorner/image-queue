@@ -1,0 +1,42 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "files": {
+    "includes": [
+      "src/**",
+      "tests/**",
+      "*.ts",
+      "*.json",
+      "*.mjs",
+      "!pnpm-lock.yaml"
+    ]
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "useAltText": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "src/components/ui/**",
+        "src/components/ai-elements/**"
+      ],
+      "linter": {
+        "enabled": false
+      }
+    }
+  ]
+}

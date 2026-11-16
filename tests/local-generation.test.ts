@@ -1,0 +1,26 @@
+import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {afterEach,expect,it,vi} from 'vitest';
+import sharp from 'sharp';
+import {MemoryStorage} from '../src/storage/memory';
+const run=vi.hoisted(()=>vi.fn());
+vi.mock('../src/storage/codex-app-server',()=>({runCodexAppServer:run}));
+import {localGeneration} from '../src/storage/local-generation';
+const roots:string[]=[];afterEach(async()=>{vi.clearAllMocks();await Promise.all(roots.splice(0).map(r=>rm(r,{recursive:true,force:true})));});
+const job={id:'one',prompt:'exact prompt',references:[],width:32,height:32,transparent:false,model:'gpt-6.1-sol' as const,effort:'low' as const};
+async function setup(bad=false){
+ const root=await mkdtemp(join(tmpdir(),'iq-generation-'));roots.push(root);const store=new MemoryStorage();
+ run.mockImplementation(async o=>{await o.beforeStart();await o.onStarted(1);await sharp({create:{width:64,height:64,channels:3,background:'blue'}}).png().toFile(o.request.output);await writeFile(o.request.receipt,JSON.stringify({prompt:bad?'rewritten':job.prompt,referencePaths:[],attachment:null}));return {path:o.request.output};});
+ return {store,generation:localGeneration(store,root)};
+}
+it('validates receipt and fits the image before publication',async()=>{
+ const {store,generation}=await setup();await generation.prepare(job);const r=await generation.generate(job,new AbortController().signal);
+ expect(run.mock.calls[0][0].request.workspace).toContain('image-queue-generation-');
+ expect(run.mock.calls[0][0].request.workspace).not.toContain('iq-generation-');
+ expect(r).toMatchObject({width:32,height:32,mime:'image/png'});expect(await store.getBlob(r.blobKey)).toBeTruthy();
+ expect((await store.list<any>('local-attempts'))[0].state).toBe('running');await generation.published(job.id);expect((await store.list<any>('local-attempts'))[0].state).toBe('succeeded');
+});
+it('rejects a rewritten prompt and records uncertainty without publishing a blob',async()=>{
+ const {store,generation}=await setup(true);await generation.prepare(job);await expect(generation.generate(job,new AbortController().signal)).rejects.toThrow('receipt');expect((await store.list<any>('local-attempts'))[0].state).toBe('uncertain');
+});

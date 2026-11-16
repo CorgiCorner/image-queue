@@ -1,0 +1,191 @@
+import { expect, it, vi } from "vitest";
+import sharp from "sharp";
+import { MemoryStorage } from "../src/storage/memory";
+import { ImageService } from "../src/core/service";
+import { prepareCorrection } from "../src/core/prepare-correction";
+import { addNote } from "../src/core/notes";
+it("prepares two references and retries the same correction without duplicate jobs", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await addNote(store, { imageId: job.id, text: "Blue sky", x: 0.5, y: 0.5 });
+  const input = { imageId: job.id, idempotencyKey: "correction" };
+  const first = await prepareCorrection(api, input);
+  const second = await prepareCorrection(api, input);
+  expect(second.id).toBe(first.id);
+  expect(first.referenceIds).toHaveLength(2);
+  expect(first.parentVersionId).toBe(job.id);
+  expect(await store.list("references")).toHaveLength(2);
+  await expect(prepareCorrection(api, { ...input, instruction: "Different" })).rejects.toThrow("different request");
+});
+it("rejects unavailable images before storing references", async () => {
+  const store = new MemoryStorage();
+  await expect(prepareCorrection(new ImageService(store), { imageId: "missing", idempotencyKey: "test" })).rejects.toThrow("ready");
+  expect(await store.list("references")).toEqual([]);
+});
+
+it("leaves notes added during reference preparation for a later correction", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await addNote(store, { imageId: job.id, text: "First note", x: 0.5, y: 0.5 });
+  const addReference = api.addReference.bind(api);
+  let added = false;
+  api.addReference = async (...args) => {
+    if (!added) {
+      added = true;
+      await addNote(store, { imageId: job.id, text: "Later note" });
+    }
+    return addReference(...args);
+  };
+  const correction = await prepareCorrection(api, { imageId: job.id, idempotencyKey: "snapshot" });
+  expect(correction.prompt).toContain("First note");
+  expect(correction.prompt).not.toContain("Later note");
+  const notes = await store.list<{ text: string; sentInJobId?: string }>("notes");
+  expect(notes.find(note => note.text === "Later note")?.sentInJobId).toBeUndefined();
+});
+
+it("resumes after the second reference fails without repeating the first", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await addNote(store, { imageId: job.id, text: "First note" });
+  const original = api.addReference.bind(api);
+  let calls = 0;
+  api.addReference = async (...args) => {
+    calls++;
+    if (calls === 2) throw new Error("Temporary failure");
+    return original(...args);
+  };
+  const input = { imageId: job.id, idempotencyKey: "retry-references" };
+  await expect(prepareCorrection(api, input)).rejects.toThrow("Temporary failure");
+  expect(await store.list("references")).toHaveLength(1);
+  await prepareCorrection(api, input);
+  expect(await store.list("references")).toHaveLength(2);
+  expect(calls).toBe(3);
+});
+
+it("reuses a committed reference when its progress write failed", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await addNote(store, { imageId: job.id, text: "First note" });
+  const put = store.put.bind(store);
+  let writes = 0;
+  store.put = async (collection, id, value) => {
+    if (collection === "prepared-corrections" && ++writes === 2) throw new Error("Progress write failed");
+    return put(collection, id, value);
+  };
+  const input = { imageId: job.id, idempotencyKey: "recover-reference" };
+  await expect(prepareCorrection(api, input)).rejects.toThrow("Progress write failed");
+  expect(await store.list("references")).toHaveLength(1);
+  await prepareCorrection(api, input);
+  expect(await store.list("references")).toHaveLength(2);
+});
+
+it("rejects a concurrent preparation and reuses the result on retry", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Concurrent corrections");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await addNote(store, { imageId: job.id, text: "Make the sky blue" });
+  const input = { imageId: job.id, idempotencyKey: "concurrent" };
+  const results = await Promise.allSettled([prepareCorrection(api, input), prepareCorrection(api, input)]);
+  expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+  expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+  const completed = results.find(result => result.status === "fulfilled")!;
+  if (completed.status !== "fulfilled") throw new Error("Missing completed request");
+  const retried = await prepareCorrection(api, input);
+  expect(retried.id).toBe(completed.value.id);
+  expect(retried.referenceIds).toEqual(completed.value.referenceIds);
+  expect(await store.list("references")).toHaveLength(2);
+  expect(await store.list("jobs")).toHaveLength(2);
+});
+
+it("keeps prompt numbering aligned with the saved annotation order on retry", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Ordered notes");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  const first = await addNote(store, { imageId: job.id, text: "First marker", x: 0.2, y: 0.2 });
+  const second = await addNote(store, { imageId: job.id, text: "Second marker", x: 0.8, y: 0.8 });
+  await store.put("notes", first.id, { ...first, createdAt: "2026-01-01T00:00:00Z" });
+  await store.put("notes", second.id, { ...second, createdAt: "2026-01-02T00:00:00Z" });
+  const original = api.create.bind(api);
+  api.create = async () => { throw new Error("Temporary job failure"); };
+  const input = { imageId: job.id, idempotencyKey: "ordered-retry" };
+  await expect(prepareCorrection(api, input)).rejects.toThrow("Temporary job failure");
+  api.create = original;
+  const list = store.list.bind(store);
+  store.list = async <T>(collection: string) => {
+    const items = await list<T>(collection);
+    return collection === "notes" ? items.reverse() : items;
+  };
+  const correction = await prepareCorrection(api, input);
+  expect(correction.prompt).toBe("1. First marker\n\n2. Second marker");
+});
+
+it("rejects changed note text after preparing references but before creating the job", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Changed notes");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  const note = await addNote(store, { imageId: job.id, text: "Original note" });
+  const create = api.create.bind(api);
+  api.create = async () => { throw new Error("Interrupted"); };
+  const input = { imageId: job.id, idempotencyKey: "changed-note" };
+  await expect(prepareCorrection(api, input)).rejects.toThrow("Interrupted");
+  api.create = create;
+  await store.put("notes", note.id, { ...note, text: "Changed note" });
+  await expect(prepareCorrection(api, input)).rejects.toThrow("Prepared notes changed");
+  expect(await store.get("jobs", "IMG-changed-note")).toBeUndefined();
+});
+
+it("leaves edited notes unsent when the prepared snapshot is submitted", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Edited notes");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  const note = await addNote(store, { imageId: job.id, text: "Original note" });
+  const addReference = api.addReference.bind(api);
+  api.addReference = async (...args) => {
+    await store.put("notes", note.id, { ...note, text: "New edit" });
+    return addReference(...args);
+  };
+  const correction = await prepareCorrection(api, { imageId: job.id, idempotencyKey: "edited-during-prepare" });
+  expect(correction.prompt).toContain("Original note");
+  expect(correction.prompt).not.toContain("New edit");
+  expect(await store.get("notes", note.id)).toMatchObject({ text: "New edit" });
+  expect((await store.get<{ sentInJobId?: string }>("notes", note.id))?.sentInJobId).toBeUndefined();
+});
+
+it("keeps notes unsent and leaves no correction when the provider key is missing", async () => {
+  vi.stubEnv("IMAGE_QUEUE_OPENAI_API_KEY", "");
+  try {
+    const store = new MemoryStorage();
+    const api = new ImageService(store);
+    await store.put("jobs", "original", {
+      id: "original", source: "api", provider: "openai", model: "gpt-image-1", status: "done",
+    });
+    const note = await addNote(store, { imageId: "original", text: "Make it brighter" });
+    await expect(prepareCorrection(api, { imageId: "original", idempotencyKey: "missing-key" }))
+      .rejects.toThrow("Connect this provider in Settings first");
+    expect(await store.get("notes", note.id)).toEqual(note);
+    expect(await store.get("jobs", "IMG-missing-key")).toBeUndefined();
+    expect(await store.list("references")).toEqual([]);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

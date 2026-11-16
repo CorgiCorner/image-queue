@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "image-queue",
+  "main": "cloudflare-worker.ts",
+  "triggers": { "crons": ["0 * * * *"] },
+  "compatibility_date": "2026-11-14",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "IMAGE_QUEUE_STORAGE_DRIVER": "cloudflare"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "image-queue",
+      "database_id": "local-image-queue"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "image-queue"
+    }
+  ],
+  "images": {
+    "binding": "IMAGES"
+  }
+}

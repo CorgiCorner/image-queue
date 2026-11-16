@@ -1,0 +1,18 @@
+node_modules
+.next
+.open-next
+.wrangler
+/storage/
+.env*
+!.env.example
+coverage
+*.tsbuildinfo
+
+work/
+dist/
+
+# Default user project folders
+/projects/
+
+__pycache__/
+*.pyc

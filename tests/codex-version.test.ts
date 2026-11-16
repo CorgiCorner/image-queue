@@ -1,0 +1,2 @@
+import{expect,it}from'vitest';import{supportedCodexVersion}from'../src/core/codex-version';
+it('requires the tested baseline or a newer semver',()=>{expect(supportedCodexVersion('codex-cli 0.167.1')).toBe(true);expect(supportedCodexVersion('codex-cli 0.168.0')).toBe(true);expect(supportedCodexVersion('codex-cli 1.0.0')).toBe(true);expect(supportedCodexVersion('codex-cli 0.167.0')).toBe(false);expect(supportedCodexVersion('unknown')).toBe(false);});

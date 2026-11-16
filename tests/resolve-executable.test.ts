@@ -1,0 +1,4 @@
+import {mkdtemp,writeFile,chmod,rm,mkdir} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {expect,it} from 'vitest';import {resolveExecutable} from '../src/storage/resolve-executable';
+it('resolves a runnable PATH entry and rejects missing/non-executable entries',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'iq-bin-'));try{await mkdir(join(root,'codex'));await expect(resolveExecutable('codex',root)).rejects.toThrow('unavailable');await rm(join(root,'codex'),{recursive:true});await writeFile(join(root,'codex'),'#!/bin/sh\n');await chmod(join(root,'codex'),0o600);await expect(resolveExecutable('codex',root)).rejects.toThrow('unavailable');await chmod(join(root,'codex'),0o700);expect(await resolveExecutable('codex',root)).toBe(join(root,'codex'));}finally{await rm(root,{recursive:true,force:true});}
+});

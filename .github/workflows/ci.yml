@@ -1,0 +1,36 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec next typegen
+      - run: pnpm typecheck
+      - run: pnpm check:boundaries
+      - run: pnpm exec vitest run --coverage --maxWorkers=1
+      - run: python3 docs/protocol/test-worker.py
+      - run: python3 scripts/test-export-public.py
+      - run: pnpm build
