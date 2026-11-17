@@ -189,3 +189,25 @@ it("keeps notes unsent and leaves no correction when the provider key is missing
     vi.unstubAllEnvs();
   }
 });
+
+it("includes the current region in v2 and reuses only the original for a text edit", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const png = await sharp({create:{width:256,height:256,channels:3,background:"white"}}).png().toBuffer();
+  const {job} = await api.importImage("original.png","image/png",png);
+  const generation = {source:"queue",provider:"openai",model:""} as const;
+  const input = {imageId:job.id,idempotencyKey:"area-edit",instruction:"Turn this area blue",generation,
+    selection:{x:0.25,y:0.25,w:0.5,h:0.5}};
+  const version = await prepareCorrection(api,input);
+  expect(version).toMatchObject({parentVersionId:job.id,versionNumber:2,prompt:"1. Turn this area blue"});
+  expect(version.referenceIds).toHaveLength(2);
+  const reference = await store.get<{blobKey:string}>("references",version.referenceIds[1]);
+  const annotated = await store.getBlob(reference!.blobKey);
+  const pixels = await sharp(annotated!.bytes).removeAlpha().raw().toBuffer();
+  expect([...pixels.subarray(0,3)]).toEqual([255,255,255]);
+  const mark = (64 * 256 + 58) * 3;
+  expect(pixels[mark]).toBeLessThan(200);
+  expect((await prepareCorrection(api,input)).id).toBe(version.id);
+  const plain = await prepareCorrection(api,{...input,idempotencyKey:"plain-edit",selection:undefined});
+  expect(plain.referenceIds).toHaveLength(1);
+});

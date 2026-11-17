@@ -71,7 +71,7 @@ import {
   mainVersionAction,
   addNoteAction,
   markNotesAction,
-  correctionAction,
+  requestVersionAction,
   moveJobAction,
   processingAction,
   poolConfigAction,
@@ -236,6 +236,12 @@ export function Workspace({
   const [pinsExpanded, setPinsExpanded] = useState(true);
   const [topic, setTopic] = useState("");
   const [destinationTopic, setDestinationTopic] = useState("");
+  function navigateTopic(id: string) {
+    setTopic(id);
+    setDestination("");
+    setDestinationTopic(id);
+    setMobileMenu(false);
+  }
   const [newTopic, setNewTopic] = useState(false);
   const [stackPicker, setStackPicker] = useState(false);
   const [stackSearch, setStackSearch] = useState("");
@@ -244,12 +250,11 @@ export function Workspace({
   const [joiningStack, setJoiningStack] = useState(false);
   const stackJoinPending = useRef(false);
   const [activeNote, setActiveNote] = useState("");
-  const [iterationPrompt, setIterationPrompt] = useState("");
+  type Point = {x: number; y: number; w?: number; h?: number};
+  type VersionDraft = {text?: string; point?: Point};
+  const [drafts, setDrafts] = useState<Record<string, VersionDraft>>({});
   const [savingNote, setSavingNote] = useState(false);
   const noteSavePending = useRef(false);
-  const [notePoint, setNotePoint] = useState<
-    { x: number; y: number; w?: number; h?: number } | undefined
-  >();
   const annotationStart = useRef<{ pointerId: number; x: number; y: number } | undefined>(
     undefined,
   );
@@ -258,6 +263,7 @@ export function Workspace({
   const [savingLibraryTag, setSavingLibraryTag] = useState(false);
   const libraryTagPending = useRef(false);
   const [tagEditorId, setTagEditorId] = useState("");
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [renameTopicName, setRenameTopicName] = useState("");
   const [topicName, setTopicName] = useState("");
@@ -265,6 +271,8 @@ export function Workspace({
   const [project, setProject] = useState(initialProject);
   function navigateProject(id: string) {
     setMobileMenu(false);
+    setDestination("");
+    setDestinationTopic("");
     setTopic("");
     setTagFilter("");
     setRetentionView("active");
@@ -384,6 +392,13 @@ export function Workspace({
   const purgeCancel = useRef<HTMLButtonElement>(null);
   const [purgeError, setPurgeError] = useState("");
   const [selected, setSelected] = useState<Job | null>(() => initialState?.jobs.find((job) => job.id === initialJob) ?? null);
+  const draftId = selected?.id ?? "";
+  const iterationPrompt = drafts[draftId]?.text ?? "";
+  const notePoint = drafts[draftId]?.point;
+  function updateDraft(change: Partial<VersionDraft>) {
+    setDrafts(previous => ({...previous, [draftId]: {...previous[draftId], ...change}}));
+  }
+  const setNotePoint = (point?: Point) => updateDraft({point});
   const closingDetail = useRef<Job | null>(null);
   if (selected) closingDetail.current = selected;
   const detailJob = selected ?? closingDetail.current;
@@ -400,8 +415,7 @@ export function Workspace({
 
   useEffect(() => {
     setPromptExpanded(false);
-    setIterationPrompt("");
-    setNotePoint(undefined);
+    setDetailsExpanded(false);
     annotationStart.current = undefined;
   }, [selected?.id]);
   useEffect(() => {
@@ -468,7 +482,6 @@ export function Workspace({
   const nextVersionInput = useRef<HTMLTextAreaElement | null>(null);
   const versionStrip = useRef<HTMLDivElement | null>(null);
   const requestKey = useRef(crypto.randomUUID());
-  const pendingReferenceDrop = useRef<{ jobs: Job[]; files: File[] } | null>(null);
   const correctionPending = useRef(false);
   const correctionRequest = useRef<{
     imageId: string;
@@ -476,7 +489,6 @@ export function Workspace({
     notesSignature: string;
     generationSignature: string;
     key: string;
-    referenceIds: string[];
   } | null>(null);
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
@@ -564,18 +576,40 @@ export function Workspace({
       setReadySinceOpening(count => count + completed);
     }
   }, [data.jobs]);
-  const active = data.jobs.some((j) =>
-    ["queued", "running"].includes(j.status),
-  );
+  const pendingJobs = useMemo(() => data.jobs.filter(job =>
+    job.status === "queued" || job.status === "running"), [data.jobs]);
   useEffect(() => {
-    const id = setInterval(
-      () => {
-        refresh().catch(() => {});
-      },
-      active ? 5000 : 30000,
-    );
-    return () => clearInterval(id);
-  }, [active, refresh]);
+    let pending = false;
+    let disposed = false;
+    let lastFull = Date.now();
+    let offset = 0;
+    async function poll(forceFull = false) {
+      if (document.hidden || pending || disposed) return;
+      pending = true;
+      try {
+        let full = forceFull || !pendingJobs.length || Date.now() - lastFull >= 30000;
+        if (!full) {
+          const batch = pendingJobs.slice(offset, offset + 32);
+          offset = (offset + batch.length) % pendingJobs.length;
+          const query = new URLSearchParams(batch.map(job => ["job", job.id]));
+          const response = await fetch(`/api/state?${query}`);
+          if (!response.ok || disposed) return;
+          const statuses: Pick<Job, "id" | "status" | "updatedAt" | "claim">[] = await response.json();
+          full = statuses.length !== batch.length || statuses.some((entry, index) => {
+            const job = batch[index];
+            return job.id !== entry.id || job.status !== entry.status || job.updatedAt !== entry.updatedAt ||
+              JSON.stringify(job.claim) !== JSON.stringify(entry.claim);
+          });
+        }
+        if (full && !disposed && !document.hidden) { await refresh(); lastFull = Date.now(); }
+      } catch { /* Retry on the next visible interval. */ }
+      finally { pending = false; }
+    }
+    const onVisibility = () => { if (!document.hidden) void poll(true); };
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = setInterval(() => void poll(), pendingJobs.length ? 5000 : 30000);
+    return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); };
+  }, [pendingJobs, refresh]);
   useEffect(() => {
     try {
       setDark(window.localStorage.getItem("image-queue-theme") !== "light");
@@ -687,7 +721,7 @@ export function Workspace({
   )), [viewJobs, project, topic]);
   const projectId = data.projects.some(item => item.id === destination)
     ? destination
-    : currentProject?.id || data.projects[0]?.id;
+    : currentProject?.id || (project === "inbox" ? "inbox" : data.projects[0]?.id ?? "inbox");
   useEffect(() => {
     if (destinationTopic && !data.topics?.some(item => item.id === destinationTopic && item.projectId === projectId && !item.deleted)) {
       setDestinationTopic("");
@@ -768,7 +802,7 @@ export function Workspace({
   ));
   const showFilterRow = selectedIds.length === 0 &&
     !settingsPage && retentionView === "active" &&
-    (queuePage ? active : galleryScope.length > 0);
+    (queuePage ? pendingJobs.length > 0 : galleryScope.length > 0);
   useEffect(() => {
     if (!showFilterRow) return;
     const row = filterRow.current;
@@ -797,6 +831,7 @@ export function Workspace({
     ? "API processing is paused. Requests will wait in the queue."
     : data.processing.api.blockedReason ?? (!data.processing.api.online ? "The API executor is offline. Keep the local dashboard running to process requests." : undefined);
   const workersUnavailable = queueRequestsNotice !== undefined;
+  const submitToQueue = source === "queue" && workersUnavailable;
   const connectedProviders = [
     ...new Set(data.models.filter(entry => entry.provider === "openai").map((entry) => entry.provider)),
   ];
@@ -978,21 +1013,19 @@ export function Workspace({
     } catch (error) { setNotice((error as Error).message); }
     finally { directoryPickerPending.current = false; setPickingDirectory(null); }
   }
+  const [confirmationLink, setConfirmationLink] = useState<{id:string; message:string}>();
   const [pendingConfirmation, setPendingConfirmation] = useState<{ ids: string[]; message: string } | null>(null);
   useEffect(() => {
     if (!pendingConfirmation) return;
     setPendingConfirmation(null);
     const main = workspaceMain.current;
     if (main && anyTileVisible(main, pendingConfirmation.ids, galleryVisibleArea(main))) return;
+    if (pendingConfirmation.ids[0]) setConfirmationLink({id: pendingConfirmation.ids[0], message: pendingConfirmation.message});
     setNotice(pendingConfirmation.message);
   }, [pendingConfirmation]);
   const requestInFlight = useRef(false);
   async function submit(values: z.infer<typeof formSchema>) {
     if (requestInFlight.current) return;
-    if (!projectId) {
-      setNewProject(true);
-      return;
-    }
     if (source === "api" && !sizes.length) {
       setNotice(unavailableSizeMessage);
       return;
@@ -1046,10 +1079,6 @@ export function Workspace({
     }
   }
   async function upload(file: File, parentId?: string, timestampMs?: number, targetProjectId = projectId) {
-    if (!targetProjectId) {
-      setNewProject(true);
-      return;
-    }
     const body = new FormData();
     body.set("file", file);
     body.set("projectId", targetProjectId);
@@ -1083,12 +1112,6 @@ export function Workspace({
       throw new Error("References support PNG, JPEG and WebP images");
     const referenceCount = refs.length + jobs.length + files.length;
     if (referenceCount > 10) throw new Error("You can add up to 10 image references");
-    if (!projectId) {
-      pendingReferenceDrop.current = { jobs, files };
-      setLibrary(false);
-      setNewProject(true);
-      return;
-    }
     await attachReferences(jobs, files, projectId);
   }
 
@@ -1169,8 +1192,7 @@ export function Workspace({
     const point = notePoint;
     try {
       showError(await addNoteAction({ imageId: job.id, text: draft, ...point }));
-      setIterationPrompt(current => current === draft ? "" : current);
-      setNotePoint(current => current === point ? undefined : current);
+      updateDraft({text: "", point: undefined});
       await refresh();
     } catch (error) {
       setNotice((error as Error).message);
@@ -1188,85 +1210,25 @@ export function Workspace({
     );
     if (!notes.length && !instruction.trim()) return;
     const generationSignature = JSON.stringify({ source, provider, model });
-    const notesSignature = JSON.stringify(notes.map(({ id, text, x, y, w, h }) => ({ id, text, x, y, w, h })));
+    const notesSignature = JSON.stringify([notePoint, notes.map(({ id, text, x, y, w, h }) => ({ id, text, x, y, w, h }))]);
     correctionPending.current = true;
     setBusy(true);
     try {
-      const response = await fetch(asset(job, false));
-      if (!response.ok) throw new Error("Could not load original image");
-      const blob = await response.blob();
-      const bitmap = await createImageBitmap(blob);
-      const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const context = canvas.getContext("2d");
-      if (!context) {
-        bitmap.close();
-        throw new Error("Canvas unavailable");
+      let pending = correctionRequest.current;
+      if (!pending || pending.imageId !== job.id || pending.instruction !== instruction ||
+          pending.notesSignature !== notesSignature || pending.generationSignature !== generationSignature) {
+        pending = {imageId: job.id, instruction, notesSignature, generationSignature, key: crypto.randomUUID()};
+        correctionRequest.current = pending;
       }
-      try {
-        context.drawImage(bitmap, 0, 0);
-      } finally {
-        bitmap.close();
-      }
-      notes.forEach((note, index) => {
-        if (note.x === undefined || note.y === undefined) return;
-        const x = note.x * canvas.width,
-          y = note.y * canvas.height;
-        if (note.w && note.h) {
-          context.strokeStyle = "#5f5ce6";
-          context.lineWidth = 4;
-          context.strokeRect(
-            x,
-            y,
-            note.w * canvas.width,
-            note.h * canvas.height,
-          );
-        }
-        context.fillStyle = "#5f5ce6";
-        context.beginPath();
-        context.arc(x, y, 24, 0, Math.PI * 2);
-        context.fill();
-        context.fillStyle = "#fff";
-        context.font = "bold 24px sans-serif";
-        context.fillText(String(index + 1), x - 7, y + 8);
-      });
-      const annotated = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, "image/png"),
-      );
-      if (!annotated) throw new Error("Could not create annotated reference");
-      const pending =
-        correctionRequest.current?.imageId === job.id && correctionRequest.current.instruction === instruction && correctionRequest.current.notesSignature === notesSignature && correctionRequest.current.generationSignature === generationSignature
-          ? correctionRequest.current
-          : { imageId: job.id, instruction, notesSignature, generationSignature, key: crypto.randomUUID(), referenceIds: [] };
-      correctionRequest.current = pending;
-      const referenceIds = pending.referenceIds;
-      for (const [index, [file, name]] of (
-        [
-          [blob, "original.png"],
-          [annotated, "notes.png"],
-        ] as const
-      ).entries()) {
-        if (referenceIds[index]) continue;
-        const body = new FormData();
-        body.set("file", new File([file], name, { type: file.type }));
-        body.set("projectId", job.projectId);
-        const uploaded = await fetch("/api/upload", { method: "POST", body });
-        const reference = await uploaded.json();
-        if (!uploaded.ok) throw new Error(reference.error);
-        referenceIds.push(reference.id);
-      }
-      const result = await correctionAction({
-        imageId: job.id,
-        referenceIds,
-        idempotencyKey: pending.key,
-        instruction: pending.instruction,
-        generation: { source, provider, model },
+      const result = await requestVersionAction({
+        imageId: job.id, instruction, selection: instruction.trim() ? notePoint : undefined,
+        idempotencyKey: pending.key, generation: { source, provider, model },
       });
       showError(result);
       correctionRequest.current = null;
-      setIterationPrompt("");
-      await refresh();
+      updateDraft({text: "", point: undefined});
+      const latest = await refresh();
+      if (result?.data) setSelected(latest.jobs.find(entry => entry.id === result.data?.id) ?? result.data);
       setNotice(source === "queue" ? "Correction added to queue" : "Image correction started");
     } catch (error) {
       setNotice((error as Error).message);
@@ -1446,7 +1408,7 @@ export function Workspace({
             window.history.replaceState({}, "", "/?view=queue");
             setRetentionView("active");
             setQueuePage(true);
-            setTopic("");
+            navigateTopic("");
             setTagFilter("");
             setSearch("");
             setFilter("all");
@@ -1542,7 +1504,7 @@ export function Workspace({
                               .projectId
                           : target.id,
                       );
-                      if (pin.targetType === "topic") setTopic(pin.targetId);
+                      if (pin.targetType === "topic") navigateTopic(pin.targetId);
                     }}
                   >
                     {pin.targetType === "project" ? <Folder size={16} /> : <Layers3 size={16} />}
@@ -1688,7 +1650,7 @@ export function Workspace({
                   variant="ghost"
                   className={`nav-item ${topic === t.id ? "selected" : ""}`}
                   aria-current={!settingsPage && topic === t.id ? "page" : undefined}
-                  onClick={() => setTopic(t.id)}
+                  onClick={() => navigateTopic(t.id)}
                 >
                   {t.name}
                 </Button>
@@ -2441,7 +2403,7 @@ export function Workspace({
                 </div>
                 )
               )}
-              {(selectedIds.length > 0 || (retentionView === "active" && (queuePage ? active : galleryScope.length > 0))) && <SelectionToolbar selected={selectedIds.length > 0}>
+              {(selectedIds.length > 0 || (retentionView === "active" && (queuePage ? pendingJobs.length > 0 : galleryScope.length > 0))) && <SelectionToolbar selected={selectedIds.length > 0}>
                 {showFilterRow && (
                 <div ref={filterRow} onScroll={measureFilters} className={`filters ${filterEdges.left ? "fade-left" : ""} ${filterEdges.right ? "fade-right" : ""}`}>
                   {(queuePage ? [
@@ -2637,8 +2599,11 @@ export function Workspace({
                         ? counts.active > 0
                           ? `${counts.active} ${counts.active === 1 ? "request is" : "requests are"} waiting, reserved, or generating.`
                           : "Finished images will appear here."
-                      : retentionView === "trash" ? "Images you move to Trash will appear here." : retentionView === "archive" ? "Images you archive will appear here." : queuePage ? "Requests appear here while they wait, are reserved by a worker, or are generating." : project === "inbox" ? "Drop images here or use Import images to add files." : "Describe an image below, add a reference, and make it yours."}
+                      : retentionView === "trash" ? "Images you move to Trash will appear here." : retentionView === "archive" ? "Images you archive will appear here." : queuePage ? "Requests appear here while they wait, are reserved by a worker, or are generating." : project === "inbox" ? "Drop images here or use Import images to add files." : !data.projects.length ? "Your first image will be saved in Inbox. You can also create a project for it." : "Describe an image below, add a reference, and make it yours."}
                   </p>
+                  {!data.projects.length && !search && retentionView === "active" && !queuePage && (
+                    <Button variant="outline" className="mt-3" onClick={() => setNewProject(true)}>Choose a project folder</Button>
+                  )}
                   {!search && retentionView === "active" && !queuePage && filter === "done" && counts.active > 0 && (
                     <Button className="mt-3" variant="outline" onClick={() => setFilter("active")}>Show in progress</Button>
                   )}
@@ -2921,9 +2886,10 @@ export function Workspace({
                   )}
                   <Button
                     type="submit"
-                    className="generate-button"
+                    className={`generate-button${submitToQueue ? " queue-submit" : ""}`}
                     disabled={busy || promptEmpty || (source === "api" && (!model || !sizes.length))}
-                    aria-label="Generate image"
+                    title={submitToQueue ? "Add to queue" : "Generate image"}
+                    aria-label={submitToQueue ? "Add to queue" : "Generate image"}
                     aria-busy={busy}
                     aria-describedby={busy || promptEmpty || (source === "api" && (!model || !sizes.length)) ? "generate-disabled-reason" : undefined}
                   >
@@ -2932,6 +2898,7 @@ export function Workspace({
                     ) : (
                       <ArrowUp size={20} />
                     )}
+                    {submitToQueue && <span>Add to queue</span>}
                   </Button>
                 </div>
               </form>
@@ -2943,6 +2910,7 @@ export function Workspace({
               )}
               {sizeAdaptation && <p className="text-muted-foreground" role="status">{sizeAdaptation}</p>}
               <div className="composer-hint">
+                {(source === "queue" ? queueRequestsNotice : apiNotice) && <span className="mobile-processing-status" role="status">{source === "api" ? "API processing unavailable · requests will wait" : workersPaused ? "Queue paused · requests will wait" : "Queue unavailable · requests will wait"}</span>}
                 <span className="composer-attribution">
                   {source === "queue"
                     ? "Generated by your Codex workers"
@@ -2952,7 +2920,7 @@ export function Workspace({
                       {" "}
                       in{" "}
                       <strong>
-                        {data.projects.find(item => item.id === projectId)?.name}
+                        {data.projects.find(item => item.id === projectId)?.name ?? "Inbox"}{destinationTopic && ` / ${data.topics?.find(item => item.id === destinationTopic)?.name ?? ""}`}
                       </strong>
                     </>
                   )}
@@ -2969,13 +2937,11 @@ export function Workspace({
           <Notification message={notice} onDismiss={() => setNotice("")}
             action={notice === "Connect this provider in Settings first"
               ? <a href="/settings#provider-connection" className={buttonVariants({ variant: "outline", size: "sm" })}>Open settings</a>
+              : confirmationLink?.message === notice ? <a className={buttonVariants({variant:"outline",size:"sm"})} href={`/jobs/${encodeURIComponent(confirmationLink.id)}`}>Open request</a>
               : undoId && notice === undoNotice ? <Button variant="outline" size="sm" disabled={undoBusy} onClick={() => void undoLastRetention()}>Undo</Button> : undefined}
           />
         )}
-      <Dialog open={newProject} onOpenChange={(open) => {
-        if (!open) pendingReferenceDrop.current = null;
-        setNewProject(open);
-      }}>
+      <Dialog open={newProject} onOpenChange={setNewProject}>
         <DialogContent>
           {notice && (
             <p className="field-error" role="status">
@@ -2998,14 +2964,12 @@ export function Workspace({
                 const result = await createProjectAction({ name: projectName, directory: projectDirectory.trim() || undefined });
                 showError(result);
                 if (result?.data) {
-                  setProject(result.data.id);
+                  navigateProject(result.data.id);
                   setNewProject(false);
                   setProjectName("");
                   setProjectDirectory("");
-                  const drop = pendingReferenceDrop.current;
-                  pendingReferenceDrop.current = null;
                   await refresh();
-                  if (drop) await attachReferences(drop.jobs, drop.files, result.data.id);
+                  promptInput.current?.focus();
                 }
               } catch (e) {
                 setNotice((e as Error).message);
@@ -3149,8 +3113,59 @@ export function Workspace({
                 )}
               </div>
               <div className="detail-info">
-                <div className="detail-info-scroll">
                 {notice && <p className="detail-notice" role="status">{notice}</p>}
+                {detailJob.status === "done" && <div className="next-version field">
+                  <Label htmlFor="next-version">Next version{notePoint ? " · Selected area" : ""}</Label>
+                  <Textarea maxLength={notePoint ? 4000 : 12000} disabled={busy || savingNote || detailJob.status !== "done" || Boolean(detailJob.archivedAt || detailJob.trashedAt)} ref={nextVersionInput} id="next-version" value={iterationPrompt} onChange={event => updateDraft({text: event.target.value})}
+                    placeholder="Describe what should change"
+                    onKeyDown={async event => {
+                      if (event.key !== "Enter" || event.nativeEvent.isComposing || noteSavePending.current) return;
+                      if (event.metaKey || event.ctrlKey) {event.preventDefault();void requestCorrection(detailJob,iterationPrompt);return;}
+                      if (!event.shiftKey && iterationPrompt.trim()) {
+                        event.preventDefault();
+                        await saveImageNote(detailJob);
+                      }
+                    }} />
+                  <div className="version-actions">
+                    {!correctionNeedsConnection && (
+                  <Button disabled={savingNote || busy || Boolean(correctionSourceError) || detailJob.status !== "done" || Boolean(detailJob.archivedAt || detailJob.trashedAt) || (!iterationPrompt.trim() && !(data.notes ?? []).some(note => note.imageId === detailJob.id && !note.sentInJobId))}
+                    onClick={() => void requestCorrection(detailJob,iterationPrompt)}>{detailJob.stackId ? `Request v${nextVersionNumber}` : "Request next version"}</Button>
+                    )}
+                  <Button variant="outline" disabled={busy || savingNote || !iterationPrompt.trim() || iterationPrompt.trim().length > 4000 || !!detailJob.archivedAt || !!detailJob.trashedAt}
+                    onClick={() => void saveImageNote(detailJob)}>Add note</Button>
+                  </div>
+                  {savingNote && <p role="status">Saving note…</p>}
+                  <div className="next-version-source">
+                    <div className="field">
+                      <Label htmlFor="next-version-source">Source</Label>
+                      <SelectInput id="next-version-source" label="Next version source" value={source}
+                        onValueChange={value => setSource(value as typeof source)}
+                        options={[{value:"queue",label:"Codex queue",disabled:data.cloud},{value:"api",label:"Your API key · OpenAI"}]} />
+                    </div>
+                    {source === "api" && !correctionNeedsConnection && <div className="field">
+                      <Label htmlFor="next-version-model">Model</Label>
+                      <SelectInput id="next-version-model" label="Next version model" value={model}
+                        onValueChange={value => {setModel(value);setResolution("");}}
+                        placeholder="Connect OpenAI in Settings"
+                        options={models.map(item => ({value:item.id,label:item.name,disabled:!item.references}))} />
+                    </div>}
+                  </div>
+                  <WorkerAlert enabled={source==="queue" || !!data.processing} unavailable={source==="queue" ? workersUnavailable : !!apiNotice}
+                    instantHeight={priorComposerSource.current !== source}
+                    message={(source==="queue" ? queueVersionNotice : apiNotice) ?? ""}
+                    manageHref={manageProcessingHref} />
+                  {correctionNeedsConnection ? <>
+                    <p className="text-muted-foreground" role="status">Connect OpenAI to edit this image with your API key.</p>
+                    <Button onClick={() => router.push("/settings?provider=openai")}>Connect OpenAI in Settings</Button>
+                  </> : <>
+                  {correctionSourceError && <p className="text-muted-foreground" role="status">{correctionSourceError}</p>}
+
+                  </>}
+                </div>}
+                {detailJob.status === "done" && !detailJob.archivedAt && !detailJob.trashedAt &&
+                  <Button className="mobile-detail-toggle" variant="outline" aria-controls="image-metadata"
+                    aria-expanded={detailsExpanded} onClick={() => setDetailsExpanded(open => !open)}>Image details</Button>}
+                <div id="image-metadata" className="detail-info-scroll">
                 {(detailJob.archivedAt || detailJob.trashedAt) && <div className="retention-notice" role="status">
                   <span>{detailJob.trashedAt ? "This image is in Trash" : "This image is archived"}</span>
                   <Button variant="outline" onClick={async () => {
@@ -3393,47 +3408,6 @@ export function Workspace({
                 </div>
                 {detailJob.outputPath && <OutputPath path={detailJob.outputPath} onNotice={setNotice} />}
                 </div>
-                {detailJob.status === "done" && <div className="next-version field">
-                  <Label htmlFor="next-version">Next version{notePoint ? " · Selected area" : ""}</Label>
-                  <Textarea maxLength={notePoint ? 4000 : 12000} disabled={savingNote || detailJob.status !== "done" || Boolean(detailJob.archivedAt || detailJob.trashedAt)} ref={nextVersionInput} id="next-version" value={iterationPrompt} onChange={event => setIterationPrompt(event.target.value)}
-                    placeholder="Describe what should change"
-                    onKeyDown={async event => {
-                      if (event.key !== "Enter" || event.nativeEvent.isComposing || noteSavePending.current) return;
-                      if (event.metaKey || event.ctrlKey) {event.preventDefault();void requestCorrection(detailJob,iterationPrompt);return;}
-                      if (!event.shiftKey && iterationPrompt.trim()) {
-                        event.preventDefault();
-                        await saveImageNote(detailJob);
-                      }
-                    }} />
-                  {savingNote && <p role="status">Saving note…</p>}
-                  <div className="next-version-source">
-                    <div className="field">
-                      <Label htmlFor="next-version-source">Source</Label>
-                      <SelectInput id="next-version-source" label="Next version source" value={source}
-                        onValueChange={value => setSource(value as typeof source)}
-                        options={[{value:"queue",label:"Codex queue",disabled:data.cloud},{value:"api",label:"Your API key · OpenAI"}]} />
-                    </div>
-                    {source === "api" && !correctionNeedsConnection && <div className="field">
-                      <Label htmlFor="next-version-model">Model</Label>
-                      <SelectInput id="next-version-model" label="Next version model" value={model}
-                        onValueChange={value => {setModel(value);setResolution("");}}
-                        placeholder="Connect OpenAI in Settings"
-                        options={models.map(item => ({value:item.id,label:item.name,disabled:!item.references}))} />
-                    </div>}
-                  </div>
-                  <WorkerAlert enabled={source==="queue" || !!data.processing} unavailable={source==="queue" ? workersUnavailable : !!apiNotice}
-                    instantHeight={priorComposerSource.current !== source}
-                    message={(source==="queue" ? queueVersionNotice : apiNotice) ?? ""}
-                    manageHref={manageProcessingHref} />
-                  {correctionNeedsConnection ? <>
-                    <p className="text-muted-foreground" role="status">Connect OpenAI to edit this image with your API key.</p>
-                    <Button onClick={() => router.push("/settings?provider=openai")}>Connect OpenAI in Settings</Button>
-                  </> : <>
-                  {correctionSourceError && <p className="text-muted-foreground" role="status">{correctionSourceError}</p>}
-                  <Button disabled={savingNote || busy || Boolean(correctionSourceError) || detailJob.status !== "done" || Boolean(detailJob.archivedAt || detailJob.trashedAt) || (!iterationPrompt.trim() && !(data.notes ?? []).some(note => note.imageId === detailJob.id && !note.sentInJobId))}
-                    onClick={() => void requestCorrection(detailJob,iterationPrompt)}>{detailJob.stackId ? `Request v${nextVersionNumber}` : "Request next version"}</Button>
-                  </>}
-                </div>}
                 {isReserved(detailJob) && <div className="detail-recovery field">
                   <p>Reserved by {detailJob.claim?.owner} since {reservationTime(detailJob.claim?.since, healthNow)}.</p>
                   {reservationReviewId !== detailJob.id ? <Button variant="outline" onClick={()=>setReservationReviewId(detailJob.id)}>Review reservation</Button> : <>

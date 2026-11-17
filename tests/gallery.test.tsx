@@ -707,10 +707,9 @@ it("keeps a gallery tile in place when its thumbnail fails", () => {
   );
   const image = container.querySelector("img")!;
   fireEvent.error(image);
-  expect(image.style.visibility).toBe("hidden");
+  expect(screen.getByText("Preview unavailable · Open image")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Ready: Image 1" })).toBeTruthy();
-  fireEvent.load(image);
-  expect(image.style.visibility).toBe("");
+  expect(container.querySelector("img")).toBeNull();
 });
 
 it("keeps tiles inside the resized gallery even without a new observer notification",()=>{

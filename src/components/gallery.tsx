@@ -73,6 +73,7 @@ export function Gallery({
   const [windowBounds, setWindowBounds] = useState({ top: 0, bottom: 900 });
   const [focused, setFocused] = useState(0);
   const [rapidScroll, setRapidScroll] = useState(false);
+  const [failedThumbnails, setFailedThumbnails] = useState<Set<string>>(() => new Set());
   const loadedThumbnails = useRef(new Set<string>());
   const pendingSurfaces = useRef(new Map<string, HTMLElement>());
   const readyTransitions = useRef(new Map<string, () => void>());
@@ -484,7 +485,7 @@ export function Gallery({
                 style={{ backgroundColor: job.dominantColor }}
               >
                 {job.status === "done" ? (
-                  (!rapidScroll || loadedThumbnails.current.has(thumbnail)) && <GeneratedImage
+                  failedThumbnails.has(thumbnail) ? <span className="thumbnail-fallback">Preview unavailable · Open image</span> : (!rapidScroll || loadedThumbnails.current.has(thumbnail)) && <GeneratedImage
                     src={thumbnail}
                     style={{ opacity: loadedThumbnails.current.has(thumbnail) ? 1 : 0 }}
                     onLoad={event => {
@@ -492,7 +493,7 @@ export function Gallery({
                       event.currentTarget.style.opacity = "1";
                       loadedThumbnails.current.add(thumbnail);
                     }}
-                    onError={event => { event.currentTarget.style.visibility = "hidden"; }}
+                    onError={() => setFailedThumbnails(previous => new Set(previous).add(thumbnail))}
                     srcSet={thumbnailWidths
                       .map((size) => `${imageUrl(job, size)} ${size}w`)
                       .join(", ")}

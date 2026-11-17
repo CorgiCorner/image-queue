@@ -5,6 +5,7 @@ import { requireReleaseProvider } from "@/core/release-providers";
 import { applyVerifiedModelProfiles } from "@/core/model-profiles";
 import { purgeInput } from "@/core/purge-plan";
 import { retentionInput } from "@/core/retention";
+import { prepareCorrection, workspaceCorrectionSchema } from "@/core/prepare-correction";
 import { noteInput } from "@/core/notes";
 import { pathsSchema, savePaths } from "@/core/paths";
 import { revalidatePath } from "next/cache";
@@ -89,6 +90,7 @@ export const requestImageAction = action
       resolveModelSize(profile.data, parsedInput);
       await readKey(api.store, parsedInput.provider);
     }
+    if (parsedInput.projectId === "inbox") await api.ensureInbox();
     const job = await api.create(parsedInput);
     await submit(job, api);
     revalidatePath("/");
@@ -413,6 +415,15 @@ export const acceptTagAction = action
       parsedInput.tag,
     ),
   );
+export const requestVersionAction = action
+  .inputSchema(workspaceCorrectionSchema)
+  .action(async ({ parsedInput }) => {
+    const api = await service();
+    if (parsedInput.generation.source === "api") requireReleaseProvider(parsedInput.generation.provider);
+    const job = await prepareCorrection(api, parsedInput);
+    await submit(job, api);
+    return job;
+  });
 export const correctionAction = action
   .inputSchema(
     z.object({

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 — 2026-11-17
+
+- Send the first prompt directly to Inbox. Opening a project or topic sets the destination for the next image. A paused queue shows its status on mobile before submission.
+- Request a new version using the area selected on the image. Save additional notes explicitly, keep a draft for each image, and open the requested version to follow its progress.
+- Edit directly below the preview on a phone. Image details expand on demand. Gallery cards can still open the original when a thumbnail fails.
+- Poll active requests with smaller status responses, pause polling in background tabs, and reuse the original image for text-only corrections.
+
 ## 0.1.4 — 2026-11-17
 
 - Manage Codex and OpenAI API processing in Settings or through MCP. Pause either source or both, set parallel requests, and see executor activity, waiting requests and the last delivery.

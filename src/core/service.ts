@@ -60,6 +60,16 @@ export class ImageService {
     await this.store.put("projects", project.id, project);
     return project;
   }
+  async ensureInbox() {
+    if (await this.store.get("projects", "inbox")) return;
+    await waitForLock(this.store, "ensure-inbox", async () => {
+      if (await this.store.get("projects", "inbox")) return;
+      await this.store.put("projects", "inbox", {
+        ...await createRecordIdentity(this.store, "projects", "inbox"),
+        id: "inbox", name: "Inbox", createdAt: new Date().toISOString(),
+      });
+    }, 2000);
+  }
   async create(input: ImageRequest) {
     const parsed = requestSchema.parse(input);
     resolveQueueSize(parsed);
@@ -230,13 +240,7 @@ export class ImageService {
     return this.store.lock(id, async () => {
       const existing = await this.store.get<Job>("jobs", id);
       if (existing) return { job: existing, duplicate: true };
-      if (projectId === "inbox" && !(await this.store.get("projects", "inbox")))
-        await this.store.put("projects", "inbox", {
-          ...await createRecordIdentity(this.store, "projects", "inbox"),
-          id: "inbox",
-          name: "Inbox",
-          createdAt: new Date().toISOString(),
-        });
+      if (projectId === "inbox") await this.ensureInbox();
       if (!(await this.store.get("projects", projectId)))
         throw new UserFacingError("Project does not exist");
       const { imageSize } = await import("image-size");
@@ -283,6 +287,7 @@ export class ImageService {
     timestampMs?: number,
     referenceId?: string,
   ) {
+    if (projectId === "inbox") await this.ensureInbox();
     if (!(await this.store.get("projects", projectId)))
       throw new UserFacingError("Project does not exist");
     if (

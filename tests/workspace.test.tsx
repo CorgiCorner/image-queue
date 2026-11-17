@@ -241,7 +241,7 @@ describe("workspace flows", () => {
     fireEvent.change(screen.getByLabelText("Image prompt"), {
       target: { value: "A glossy red panda" },
     });
-    fireEvent.click(screen.getByLabelText("Generate image"));
+    fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
     await waitFor(() => expect(requestImageAction).toHaveBeenCalled());
     expect(vi.mocked(requestImageAction).mock.calls[0][0]).toMatchObject({
       prompt: "A glossy red panda",
@@ -415,7 +415,7 @@ describe("workspace edge cases and interactions", () => {
     fireEvent.change(screen.getByLabelText("Image prompt"), {
       target: { value: "A new image" },
     });
-    fireEvent.click(screen.getByLabelText("Generate image"));
+    fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
     await screen.findByText("Request failed");
     fireEvent.click(screen.getByLabelText("Dismiss notification"));
     await waitFor(() => expect(screen.queryByText("Request failed")).toBeNull());
@@ -617,7 +617,7 @@ it("shows errors when reusing or moving a result fails", async () => {
     expect(screen.getByRole("status").textContent).toContain("blob"),
   );
 });
-it("prompts for a first project when choosing a reference file", async () => {
+it("saves the first reference file to Inbox", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({
@@ -630,7 +630,8 @@ it("prompts for a first project when choosing a reference file", async () => {
   fireEvent.change(screen.getByTestId("reference-file-input")!, {
     target: { files: [new File(["x"], "x.png", { type: "image/png" })] },
   });
-  await screen.findByLabelText("Project name");
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/upload", expect.objectContaining({ method: "POST" })));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 it("toggles mobile navigation and generation options", async () => {
@@ -654,7 +655,7 @@ it("submits distinct stable keys for image variants", async () => {
   fireEvent.change(screen.getByLabelText("Image prompt"), {
     target: { value: "A landscape in watercolor" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Generate image" }));
+  fireEvent.click(screen.getByRole("button", { name: /^(Generate image|Add to queue)$/ }));
   await waitFor(() => expect(requestImageAction).toHaveBeenCalledTimes(3));
   const keys = vi
     .mocked(requestImageAction)
@@ -809,7 +810,7 @@ it("opens the empty API connection path", async () => {
     target: { value: "api" },
   });
   expect(screen.getByRole("button", {
-    name: "Generate image",
+    name: /^(Generate image|Add to queue)$/,
     description: "Describe the image first.",
   })).toHaveProperty("disabled", true);
   fireEvent.click(screen.getByRole("button", { name: /Connect OpenAI/ }));
@@ -1010,7 +1011,7 @@ it("offers Undo only on the notice the retention action produced", async () => {
   const archived=await screen.findByText("1 items updated; 0 active requests skipped");
   expect(archived.closest(".toast")!.textContent).toContain("Undo");
   fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"A later request"}});
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   const queued=await screen.findByText("Added to the Codex queue");
   expect(screen.queryByRole("button",{name:"Undo"})).toBeNull();
   expect(queued.closest(".toast")!.querySelectorAll("button")).toHaveLength(1);
@@ -1055,15 +1056,15 @@ it("uses one next-version field in image details", async () => {
   fireEvent.change(screen.getByLabelText("Next version"),{target:{value:"Make the sky blue"}});
   expect((screen.getByRole("button",{name:"Request next version"}) as HTMLButtonElement).disabled).toBe(false);
 });
-it("clears next-version drafts when opening another image", async () => {
+it("restores the original draft after visiting another image", async () => {
   await ready();
   fireEvent.click(screen.getByRole("button",{name:"Open IMG-first"}));
   fireEvent.change(screen.getByLabelText("Next version"),{target:{value:"Draft for first image"}});
   fireEvent.click(screen.getByRole("button",{name:"Next image"}));
   expect(screen.queryByLabelText("Next version")).toBeNull();
   fireEvent.click(screen.getByRole("button",{name:"Previous image"}));
-  expect((screen.getByLabelText("Next version") as HTMLTextAreaElement).value).toBe("");
-  expect((screen.getByRole("button",{name:"Request next version"}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText("Next version") as HTMLTextAreaElement).value).toBe("Draft for first image");
+  expect((screen.getByRole("button",{name:"Request next version"}) as HTMLButtonElement).disabled).toBe(false);
 });
 it("opens the minimized composer when reusing an image prompt", async () => {
   await ready();
@@ -1226,8 +1227,19 @@ it("keeps destination topic selection independent of gallery filtering", async (
   expect(screen.getByRole("button",{name:"Open IMG-first"})).toBeTruthy();
   expect(screen.getByRole("button",{name:"Open IMG-queued"})).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"A new forest"}});
-  fireEvent.click(screen.getByRole("button",{name:"Generate image"}));
+  fireEvent.click(screen.getByRole("button",{name:/^(Generate image|Add to queue)$/}));
   await waitFor(()=>expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({topicId:"topic"})));
+});
+it("uses the open topic and resets an earlier destination override", async () => {
+  const loaded = {...structuredClone(state),topics:[{id:"topic",projectId:"project",name:"Illustrations"}]};
+  vi.stubGlobal("fetch",vi.fn(async()=>({ok:true,json:async()=>loaded})));
+  await ready();
+  fireEvent.change(screen.getByLabelText("Destination project"),{target:{value:"project-two"}});
+  fireEvent.click(screen.getByRole("button",{name:/^Project One/}));
+  fireEvent.click(screen.getByRole("button",{name:"Illustrations"}));
+  fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"Topic image"}});
+  fireEvent.click(screen.getByRole("button",{name:"Add to queue"}));
+  await waitFor(()=>expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({projectId:"project",topicId:"topic"})));
 });
 it("archives only the opened version from More", async () => {
   const {retentionAction} = await import("../src/actions");
@@ -1434,7 +1446,7 @@ it("submits exact custom dimensions for the agent queue", async () => {
   fireEvent.click(screen.getByRole("button",{name:"Apply size"}));
   expect((screen.getByLabelText("Image size") as HTMLSelectElement).value).toBe("1080x1920");
   fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"A vertical landscape"}});
-  fireEvent.click(screen.getByRole("button",{name:"Generate image"}));
+  fireEvent.click(screen.getByRole("button",{name:/^(Generate image|Add to queue)$/}));
   await waitFor(()=>expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({width:1080,height:1920,source:"queue",aspectRatio:"9:16"})));
 });
 
@@ -1461,7 +1473,7 @@ it("blocks generation when a model profile has no available size choices", async
   fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "api" } });
   fireEvent.change(screen.getByLabelText("Image model"), { target: { value: "gpt-image-test" } });
   expect(screen.getByText("Choose Custom size to enter dimensions supported by this model.")).toBeTruthy();
-  expect((screen.getByLabelText("Generate image") as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText(/^(Generate image|Add to queue)$/) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "Panda" } });
   fireEvent.keyDown(screen.getByLabelText("Image prompt"), { key: "Enter", ctrlKey: true });
   expect(requestImageAction).not.toHaveBeenCalled();
@@ -1483,10 +1495,10 @@ it("submits a validated custom size for a dimension-profile model", async () => 
   fireEvent.change(screen.getByLabelText("Height"), { target: { value: "512" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply size" }));
   expect((screen.getByLabelText("Image size") as HTMLSelectElement).value).toBe("512x512");
-  expect((screen.getByLabelText("Generate image") as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText(/^(Generate image|Add to queue)$/) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "Panda" } });
-  expect((screen.getByLabelText("Generate image") as HTMLButtonElement).disabled).toBe(false);
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  expect((screen.getByLabelText(/^(Generate image|Add to queue)$/) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   await waitFor(() => expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({ width: 512, height: 512 })));
 });
 
@@ -1526,7 +1538,7 @@ it("submits custom dimensions for a model-specific aspect ratio", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Apply size" }));
   expect((screen.getByLabelText("Image size") as HTMLSelectElement).value).toBe("1280x1024");
   fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "Panda" } });
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   await waitFor(() => expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({ width: 1280, height: 1024 })));
 });
 
@@ -1997,7 +2009,7 @@ it("drops a gallery image onto the composer as a reference", async () => {
   fireEvent.change(screen.getByRole("textbox", { name: "Image prompt" }), {
     target: { value: "Make the hat blue; preserve the person and background" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Generate image" }));
+  fireEvent.click(screen.getByRole("button", { name: /^(Generate image|Add to queue)$/ }));
   await waitFor(() => expect(requestImageAction).toHaveBeenCalledWith(
     expect.objectContaining({
       prompt: "Make the hat blue; preserve the person and background",
@@ -2296,13 +2308,13 @@ it("confirms a saved queue request even when the subsequent refresh fails", asyn
   await ready();
   const prompt = screen.getByRole<HTMLInputElement>("textbox", { name: "Image prompt" });
   fireEvent.change(prompt, { target: { value: "A red panda" } });
-  fireEvent.click(screen.getByRole("button", { name: "Generate image" }));
+  fireEvent.click(screen.getByRole("button", { name: /^(Generate image|Add to queue)$/ }));
   await screen.findByText("Added to the Codex queue. Could not refresh the workspace.");
   expect(prompt.value).toBe("");
   expect(requestImageAction).toHaveBeenCalledOnce();
 });
 
-it("attaches the original dropped file after the first project is created", async () => {
+it("attaches the original dropped file in Inbox on first use", async () => {
   const empty = { ...structuredClone(state), projects: [], jobs: [], models: [] };
   const fetchRequest = vi.fn(async (url: string, _options?: RequestInit) => ({
     ok: true,
@@ -2314,40 +2326,20 @@ it("attaches the original dropped file after the first project is created", asyn
   fireEvent.drop(screen.getByRole("textbox", { name: "Image prompt" }), {
     dataTransfer: { files: [file], getData: () => "" },
   });
-  await screen.findByRole("dialog");
-  fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "First project" } });
-  fireEvent.submit(screen.getByLabelText("Project name").closest("form")!);
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Image prompt" })));
-  expect(screen.queryByText("References added")).toBeNull();
   const uploads = fetchRequest.mock.calls.filter(([url]) => url === "/api/upload");
   expect(uploads).toHaveLength(1);
   const body = uploads[0][1]?.body as FormData;
-  expect(body.get("projectId")).toBe("new-project");
+  expect(body.get("projectId")).toBe("inbox");
   expect(body.get("file")).toEqual(file);
 });
 
-it("discards a pending reference when first-project creation is cancelled", async () => {
-  const empty = { ...structuredClone(state), projects: [], jobs: [], models: [] };
-  const fetchRequest = vi.fn(async (_url: string) => ({
-    ok: true,
-    json: async () => empty,
-  }));
-  vi.stubGlobal("fetch", fetchRequest);
-  render(<Workspace initialState={empty} />);
-  fireEvent.drop(screen.getByRole("textbox", { name: "Image prompt" }), {
-    dataTransfer: {
-      files: [new File(["image"], "discard.png", { type: "image/png" })],
-      getData: () => "",
-    },
-  });
-  await screen.findByRole("dialog");
-  fireEvent.keyDown(screen.getByLabelText("Project name"), { key: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  fireEvent.click(screen.getAllByRole("button", { name: "Create project" })[0]);
-  fireEvent.change(await screen.findByLabelText("Project name"), { target: { value: "First project" } });
-  fireEvent.submit(screen.getByLabelText("Project name").closest("form")!);
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(fetchRequest.mock.calls.map(([url]) => url)).not.toContain("/api/upload");
+it("sends the first prompt directly to Inbox", async () => {
+  render(<Workspace initialState={{...structuredClone(state), projects:[], jobs:[], models:[], localRunner:{mode:"local",enabled:0,running:0,paused:true}} as never} />);
+  fireEvent.change(screen.getByLabelText("Image prompt"), {target:{value:"First image"}});
+  fireEvent.click(screen.getByRole("button",{name:"Add to queue"}));
+  await waitFor(() => expect(requestImageAction).toHaveBeenCalledWith(expect.objectContaining({projectId:"inbox",prompt:"First image"})));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 it("clears the filter fade when a viewport resize removes the overflow", async () => {
@@ -2697,7 +2689,7 @@ it("keeps the reference strip in the same selection order sent to the queue", as
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect([...document.querySelectorAll<HTMLElement>(".reference-strip [data-reference-id]")].map(e => e.dataset.referenceId)).toEqual(["b", "a"]);
   fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "Use the first reference for the composition" } });
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   await waitFor(() => expect(requestImageAction).toHaveBeenCalled());
   expect(vi.mocked(requestImageAction).mock.calls.at(-1)?.[0].referenceIds).toEqual(["b", "a"]);
 });
@@ -2775,7 +2767,7 @@ it("links a missing provider notice directly to connection settings", async () =
   vi.mocked(requestImageAction).mockResolvedValueOnce({serverError:"Connect this provider in Settings first"} as never);
   await ready();
   fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"A test image"}});
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   const link = await screen.findByRole("link",{name:"Open settings"});
   expect(link.getAttribute("href")).toBe("/settings#provider-connection");
 });
@@ -2783,7 +2775,7 @@ it("links a missing provider notice directly to connection settings", async () =
 
 it("disables generation for empty or whitespace-only prompts", async () => {
   await ready();
-  const send=screen.getByLabelText("Generate image") as HTMLButtonElement;
+  const send=screen.getByLabelText(/^(Generate image|Add to queue)$/) as HTMLButtonElement;
   expect(send.disabled).toBe(true);
   fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"   "}});
   expect(send.disabled).toBe(true);
@@ -2797,10 +2789,10 @@ it("keeps a draft while submitting, prevents duplicate shortcuts and preserves n
   vi.mocked(requestImageAction).mockImplementationOnce(() => new Promise(done => { resolve=done; }) as ReturnType<typeof requestImageAction>);
   const prompt=screen.getByLabelText("Image prompt") as HTMLTextAreaElement;
   fireEvent.change(prompt,{target:{value:"First request"}});
-  fireEvent.click(screen.getByLabelText("Generate image"));
+  fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
   await waitFor(()=>expect(requestImageAction).toHaveBeenCalledTimes(1));
   expect(prompt.value).toBe("First request");
-  expect(screen.getByLabelText("Generate image").getAttribute("aria-busy")).toBe("true");
+  expect(screen.getByLabelText(/^(Generate image|Add to queue)$/).getAttribute("aria-busy")).toBe("true");
   fireEvent.keyDown(prompt,{key:"Enter",metaKey:true});
   fireEvent.change(prompt,{target:{value:"Next draft"}});
   await act(async()=>{resolve({data:{...state.jobs[0],id:"IMG-new"}} as unknown as Awaited<ReturnType<typeof requestImageAction>>);});
@@ -2883,7 +2875,7 @@ it("keeps the workspace usable while warning about an untested platform", async 
   expect(screen.getByText(loaded.platformSupport.warning)).toBeTruthy();
   expect((screen.getByRole("textbox", { name: "Image prompt" }) as HTMLTextAreaElement).disabled).toBe(false);
   fireEvent.change(screen.getByRole("textbox", { name: "Image prompt" }), { target: { value: "A blue circle" } });
-  expect((screen.getByRole("button", { name: "Generate image" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: /^(Generate image|Add to queue)$/ }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("explains a queue stopped by a failed attempt in the gallery and offers the stopped image", async () => {
@@ -2940,7 +2932,7 @@ describe("submit confirmation follows the new tile's visibility", () => {
   }
   async function submitPrompt() {
     fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "A brand new tile" } });
-    fireEvent.click(screen.getByLabelText("Generate image"));
+    fireEvent.click(screen.getByLabelText(/^(Generate image|Add to queue)$/));
     await waitFor(() => expect(requestImageAction).toHaveBeenCalledOnce());
   }
   afterEach(() => vi.restoreAllMocks());

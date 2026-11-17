@@ -97,6 +97,7 @@ export async function createCorrection(
     idempotencyKey: string;
     instruction?: string;
     generation?: { source: "queue" | "api"; provider: import("./schema").Provider; model: string };
+    originalOnly?: boolean;
     noteIds?: string[];
     noteSnapshot?: ImageNote[];
   },
@@ -134,8 +135,8 @@ export async function createCorrection(
       ? input.noteIds.flatMap(id => availableNotes.filter(note => note.id === id))
       : availableNotes;
     if (
-      input.referenceIds.length !== 2 ||
-      new Set(input.referenceIds).size !== 2
+      input.referenceIds.length !== (input.originalOnly ? 1 : 2) ||
+      new Set(input.referenceIds).size !== input.referenceIds.length
     )
       throw new UserFacingError("Duplicate or missing correction references");
     const intentId = input.idempotencyKey;
