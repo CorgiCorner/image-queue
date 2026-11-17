@@ -12,6 +12,7 @@ export function localMcpLaunch(paths: PathSettings, node = process.execPath): Mc
     IMAGE_QUEUE_QUEUE_DIR: path.resolve(paths.queueDirectory),
     IMAGE_QUEUE_REFERENCE_ROOTS: paths.referenceDirectories.map(directory => path.resolve(directory)).join(path.delimiter),
   };
+  if (configuration("EXECUTOR") === "scheduled") env.IMAGE_QUEUE_EXECUTOR = "scheduled";
   const credentials = configuration("CREDENTIALS_DIR");
   // An absent/empty override keeps macOS keychain mode; do not replace it with a directory.
   if (credentials !== undefined) env.IMAGE_QUEUE_CREDENTIALS_DIR = credentials ? path.resolve(credentials) : "";

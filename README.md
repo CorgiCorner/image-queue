@@ -70,6 +70,10 @@ pnpm build:mcp
 
 Copy the MCP configuration from **Settings** into Claude Code, Codex or another MCP client. The agent can then request images and read results as local file paths.
 
+Choose the default for new requests in **Settings → Default source**, or use MCP `get_generation_source` and `set_generation_source`. An explicit source on a request overrides the default for that request. Changing the default does not move existing jobs or resume a paused queue. API requests use separately billed API credit.
+
+The optional [image-queue skill](skills/image-queue/SKILL.md) explains references, source selection and error recovery for agents. Reference images must be PNG, JPEG or WebP; style documents belong in text instructions. Before retrying an uncertain result, inspect the retained output and the recovery details returned by MCP.
+
 ### Set up with an agent
 
 Give a local agent terminal access to the folder where you want image-queue, then paste:
@@ -102,7 +106,7 @@ Images and references live in your project folders. API keys are kept in the mac
 
 ## Current limits
 
-Version 0.1.0 supports local deployment on macOS (Apple silicon). Cloudflare deployment is experimental and outside this release.
+The supported deployment is local on macOS (Apple silicon). Cloudflare deployment is experimental.
 
 - Tested on macOS (Apple silicon) only. Codex queue and Keychain storage have not been verified on other platforms.
 - Tested models: GPT Image 2.6 Flare and GPT Image 1.5, at 1024 × 1024, with reference editing.

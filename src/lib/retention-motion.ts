@@ -1,6 +1,6 @@
 import { isMotionReduced } from "./motion";
 
-/** Called only after the server confirms the affected ids. */
+/** Fades out the cards a retention operation moves; the caller removes them when it resolves. */
 export async function animateRetainedCards(ids: readonly string[], root: ParentNode = document): Promise<() => void> {
   const wanted = new Set(ids);
   const cards = [...root.querySelectorAll<HTMLElement>(".virtual-card[data-job-id]")].filter(card => wanted.has(card.dataset.jobId!));

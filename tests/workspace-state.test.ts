@@ -88,3 +88,11 @@ describe("queue wait notice", () => {
     expect(queueWaitNotice({ paused: false, blockedReason: "" })).toBeUndefined();
   });
 });
+
+it("honors the saved API preference despite historical Codex queue jobs",()=>{
+ expect(defaultGenerationSource({jobs:[],localRunner:{mode:"local"},generationSource:{source:"api"}})).toBe("api");
+});
+it("does not imply that Resume fixes a size mismatch",async()=>{
+ const {queueWaitNotice}=await import("../src/core/workspace-state");
+ expect(queueWaitNotice({paused:false,blockedReason:"The generated image is too small for the requested size without upscaling"})).toContain("Resume only continues other Codex requests");
+});

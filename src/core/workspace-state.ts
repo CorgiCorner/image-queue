@@ -1,6 +1,8 @@
+import { isSizeMismatchError } from "./job-recovery";
 import type { Job } from "./schema";
 import type { PoolConfig, Pulse } from "./pool";
-export function defaultGenerationSource(state: { cloud?: boolean; jobs: Job[]; pulses?: Pulse[]; localRunner?: {mode:string} }) {
+export function defaultGenerationSource(state: { cloud?: boolean; jobs: Job[]; pulses?: Pulse[]; localRunner?: {mode:string}; generationSource?: {source:"queue"|"api"} }) {
+  if (state.generationSource) return state.cloud ? "api" as const : state.generationSource.source;
   return !state.cloud && (state.localRunner?.mode === "local" || state.pulses?.length || state.jobs.some(job => job.source === "queue")) ? "queue" as const : "api" as const;
 }
 export function jobCounts(jobs: Job[]) {
@@ -62,6 +64,7 @@ export function queueWaitNotice(state: QueueWaitState, subject: "requests" | "ve
   const waits = subject === "version" ? "This version will wait" : "Requests will wait";
   if (state.blockedReason) {
     const reason = workerStatusMessage(state.blockedReason, locales, timeZone);
+    if (isSizeMismatchError(state.blockedReason)) return `Codex queue stopped — image size mismatch. ${reason} The original was generated. Inspect it before retrying; Resume only continues other Codex requests. API requests are handled separately.`;
     return state.resumesAutomatically
       ? `Queue stopped. ${reason} ${waits} in the queue and resume after the limit resets.`
       : `Queue stopped — action needed. ${reason} ${waits} until you resume the queue.`;

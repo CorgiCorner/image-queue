@@ -138,8 +138,8 @@ export async function generate(
     const { fitImage } = await import("./image-fit");
     try {
       output = await fitImage(output.bytes, { width: job.width, height: job.height });
-    } catch {
-      adaptationError = "The generated image was saved, but could not be fitted to the requested dimensions without upscaling.";
+    } catch (error) {
+      adaptationError = error instanceof UserFacingError ? `The generated image was saved. ${error.message}` : "The generated image was saved, but could not be fitted to the requested dimensions without upscaling.";
     }
   }
   return {

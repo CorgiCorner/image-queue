@@ -45,7 +45,7 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 describe("MCP client/server flow", () => {
   it("lists tools and manages project, request, result and cancellation", async () => {
-    expect((await client.listTools()).tools.length).toBe(23);
+    expect((await client.listTools()).tools.length).toBe(25);
     const p = await call("create_project", { name: "Agent project" });
     expect(await call("list_projects")).toHaveLength(1);
     const job = await call("request_image", {
@@ -122,6 +122,8 @@ it("rejects oversized local references", async () => {
 });
 
 it("waits until the bounded polling deadline", async () => {
+  const api = await service();
+  await api.store.put("settings", "local-runner", { workers: 1, paused: false });
   const p = await call("create_project", { name: "Wait" });
   const job = await call("request_image", {
     projectId: p.id,
@@ -159,6 +161,7 @@ it("cancels an unsubmitted job through MCP", async () => {
 });
 it("waits while a job is pending and observes completion", async () => {
   const api = await service();
+  await api.store.put("settings", "local-runner", { workers: 1, paused: false });
   const project = await api.createProject("Polling");
   const job = await api.create({
     projectId: project.id,
@@ -604,6 +607,8 @@ it("rejects relative project folders through MCP without creating a project", as
 });
 
 it("cancels an MCP wait without cancelling the underlying image request", async () => {
+  const api = await service();
+  await api.store.put("settings", "local-runner", { workers: 1, paused: false });
   const project = await call("create_project", { name: "Cancelled wait" });
   const job = await call("request_image", {
     projectId: project.id, idempotencyKey: "wait-abort", prompt: "A panda",
@@ -716,5 +721,105 @@ it("returns execution guidance and the original error for blocked queue jobs", a
     expect(job.error).toContain("supported PNG");
     expect(job.execution).toMatchObject({state:"paused",requiresUserAction:true});
     expect(job.recovery).toMatchObject({action:"repair_references",automaticRetryAllowed:true});
+  }
+});
+
+it("returns size mismatch recovery through get_job and wait_for_job for both sources",async()=>{
+ const api=await service();
+ for(const source of ["queue","api"]){
+  const id=`bad-size-${source}`;
+  await api.store.put("jobs",id,{id,projectId:"inbox",source,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),referenceIds:[],status:"uncertain",error:"The generated image is too small for the requested size without upscaling",width:1024,height:1536,providerResultSize:{width:851,height:1847}});
+  for(const tool of ["get_job","wait_for_job"]){
+   const job=await call(tool,{id});
+   expect(job.recovery).toMatchObject({action:"inspect_size_mismatch",generationCompleted:true,automaticRetryAllowed:false,requestedSize:{width:1024,height:1536},actualSize:{width:851,height:1847}});
+   expect(job.recovery.message).toContain("Resuming the queue will not repair");
+  }
+ }
+});
+
+it("returns a paused Codex job immediately without polling", async () => {
+  const api = await service();
+  await api.store.put("settings", "local-runner", { workers: 1, paused: true });
+  const project = await api.createProject("Paused queue");
+  const job = await call("request_image", {
+    projectId: project.id, idempotencyKey: "paused-wait", prompt: "A panda",
+    source: "queue", width: 1024, height: 1024,
+  });
+
+  const result = await call("wait_for_job", { id: job.id, timeoutSeconds: 1 });
+  expect(result).toMatchObject({ status: "queued", execution: { state: "paused", requiresUserAction: true } });
+  expect(pollDelay).not.toHaveBeenCalled();
+});
+
+it("continues waiting for a running Codex job after pause", async () => {
+  const api = await service();
+  await api.store.put("settings", "local-runner", { workers: 1, paused: true });
+  const project = await api.createProject("Finishing work");
+  const job = await api.create({
+    projectId: project.id, idempotencyKey: "finishing-job", prompt: "A panda",
+    source: "queue", provider: "openai", model: "", transparent: false, referenceIds: [],
+    width: 1024, height: 1024,
+  });
+  await api.store.put("jobs", job.id, { ...job, status: "running" });
+  vi.mocked(pollDelay).mockImplementationOnce(async () => {
+    await api.store.put("jobs", job.id, { ...job, status: "done" });
+  });
+  expect(await call("wait_for_job", { id: job.id, timeoutSeconds: 2 })).toMatchObject({ status: "done" });
+});
+
+it("gives agents the retained Codex original when delivery cannot fit it", async () => {
+  const api = await service();
+  const id = "size-mismatch-original";
+  const original = path.join(root, "original.png");
+  await writeFile(original, png);
+  await api.store.put("generation-artifacts", id, { original });
+  await api.store.put("jobs", id, {
+    id, source: "queue", status: "uncertain", error: "The generated image is too small for the requested size",
+  });
+
+  expect(await call("get_job", { id })).toMatchObject({
+    status: "uncertain",
+    recovery: { action: "inspect_size_mismatch", generationCompleted: true, originalPath: original },
+  });
+});
+
+it("changes only the saved source and lets an omitted source use it",async()=>{
+ const api=await service();await api.store.put('models','openai',[{id:'gpt-image-1.5',name:'GPT Image',provider:'openai',references:true,transparency:true}]);
+ const result=await call('set_generation_source',{source:'api',model:'gpt-image-1.5'});
+ expect(result).toMatchObject({generationStarted:false,existingRequestsChanged:false,preference:{source:'api'}});
+ expect((await call('get_generation_source')).preference.model).toBe('gpt-image-1.5');
+ const project=await api.createProject('API default');
+ const runtime=await import('../src/core/runtime');const enqueueSpy=vi.spyOn(runtime,'enqueue').mockResolvedValue(undefined);
+ try {
+  const job=await call('request_image',{projectId:project.id,prompt:'A red square',width:1024,height:1024,idempotencyKey:'saved-default'});
+  expect(job).toMatchObject({source:'api',model:'gpt-image-1.5',status:'queued'});
+  const override=await call('request_image',{projectId:project.id,prompt:'A blue square',source:'queue',width:1024,height:1024,idempotencyKey:'explicit-override'});
+  expect(override).toMatchObject({source:'queue',status:'queued'});
+  expect((await call('get_generation_source')).preference.source).toBe('api');
+ } finally {enqueueSpy.mockRestore();}
+});
+
+it("replays an identical MCP request after its default and model catalog change", async () => {
+  const api = await service();
+  await api.store.put("models", "openai", [{ id: "gpt-image-1.5", name: "GPT Image", provider: "openai" }]);
+  await call("set_generation_source", { source: "api", model: "gpt-image-1.5" });
+  const project = await api.createProject("Stable requests");
+  const request = { projectId: project.id, idempotencyKey: "stable-request", prompt: "A blue square", aspectRatio: "1:1" };
+  const runtime = await import("../src/core/runtime");
+  const enqueue = vi.spyOn(runtime, "enqueue").mockResolvedValue(undefined);
+  try {
+    const job = await call("request_image", request);
+    const done = { ...job, status: "done" };
+    await api.store.put("jobs", job.id, done);
+    await api.store.delete("models", "openai");
+    await call("set_generation_source", { source: "queue" });
+    enqueue.mockClear();
+
+    expect(await call("request_image", request)).toEqual(done);
+    expect(await call("request_images", { requests: [request] })).toEqual([done]);
+    await expect(call("request_image", { ...request, prompt: "A red square" })).rejects.toThrow("Idempotency key");
+    expect(enqueue).not.toHaveBeenCalled();
+  } finally {
+    enqueue.mockRestore();
   }
 });

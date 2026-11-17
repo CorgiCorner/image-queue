@@ -43,3 +43,13 @@ it("keeps the draft and current tags on failure and rejects double submits",asyn
  resolve({serverError:'Could not save'});await waitFor(()=>expect(screen.getByRole('status').textContent).toBe('Could not save'));
  expect((input as HTMLInputElement).value).toBe('custom');expect(screen.getByRole('button',{name:'Remove tag kept'})).toBeTruthy();
 });
+it("reveals the complete tag in a tooltip instead of a native title and keeps each chip's name",async()=>{
+ const tag='a very long descriptive tag that is truncated';
+ const job={id:'long',tags:[{tag,source:'user'},{tag:`${tag} too`,source:'agent'}]} as Job;
+ render(<ImageTags job={job} onUpdated={()=>{}}/>);
+ const accepted=screen.getByRole('button',{name:`Remove tag ${tag}`}),suggested=screen.getByRole('button',{name:`Add tag ${tag} too`});
+ expect(accepted.hasAttribute('title')).toBe(false);expect(suggested.hasAttribute('title')).toBe(false);
+ fireEvent.focus(accepted);
+ await waitFor(()=>expect(screen.getByRole('tooltip').textContent).toBe(tag));
+ expect(accepted.textContent).toContain('…');
+});

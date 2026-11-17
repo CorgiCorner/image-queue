@@ -67,6 +67,7 @@ import {
   pathSettingsAction,
   disconnectAction,
   connectAction,
+  testConnectionAction,
   createProjectAction,
   moveJobAction,
   moveProjectAction,
@@ -451,4 +452,47 @@ it('rejects folder opening without a local origin and rejects arbitrary clients'
  await openAgentConfigDirectoryAction({client:'Codex'});expect(mocks.openConfigFolder).not.toHaveBeenCalled();
  mocks.headers.mockResolvedValue(new Headers({host:'127.0.0.1:3391',origin:'http://127.0.0.1:3391'}));
  await openAgentConfigDirectoryAction({client:'../../secret'} as never);expect(mocks.openConfigFolder).not.toHaveBeenCalled();
+});
+
+it("tests a connected provider with the stored key and changes nothing", async () => {
+  mocks.readKey.mockResolvedValueOnce("stored-private-key");
+  mocks.discover.mockResolvedValueOnce(Array.from({ length: 12 }, (_, index) => ({ id: `gpt-image-${index}` })));
+  const result = await testConnectionAction({ provider: "openai" });
+  expect(result?.data).toEqual({ models: 12 });
+  expect(mocks.readKey).toHaveBeenCalledWith(expect.anything(), "openai");
+  expect(mocks.discover).toHaveBeenCalledWith("openai", "stored-private-key");
+  expect(JSON.stringify(result)).not.toContain("stored-private-key");
+  expect(mocks.saveKey).not.toHaveBeenCalled();
+  expect(mocks.put).not.toHaveBeenCalled();
+  expect(mocks.revalidatePath).not.toHaveBeenCalled();
+});
+it("reports a provider rejection of the stored key as one sentence", async () => {
+  mocks.readKey.mockResolvedValueOnce("stored-private-key");
+  mocks.discover.mockRejectedValueOnce(new UserFacingError("The provider rejected this API key (401). Check the key and try again."));
+  const result = await testConnectionAction({ provider: "openai" });
+  expect(result?.serverError).toBe("The provider rejected this API key (401). Check the key and try again.");
+  expect(JSON.stringify(result)).not.toContain("stored-private-key");
+  expect(mocks.put).not.toHaveBeenCalled();
+});
+it("hides unexpected provider failures and reports an empty catalog", async () => {
+  mocks.discover.mockRejectedValueOnce(new Error("Authorization: Bearer fixture-key"));
+  const failed = await testConnectionAction({ provider: "openai" });
+  expect(failed?.serverError).toBe("The operation could not be completed. Try again.");
+  expect(JSON.stringify(failed)).not.toContain("fixture-key");
+  mocks.discover.mockResolvedValueOnce([]);
+  expect((await testConnectionAction({ provider: "openai" }))?.serverError)
+    .toBe("The provider answered, but no supported image models are available for this key.");
+});
+it("asks to connect first when no key is stored, without calling the provider", async () => {
+  mocks.readKey.mockRejectedValueOnce(new UserFacingError("Connect this provider in Settings first"));
+  const result = await testConnectionAction({ provider: "openai" });
+  expect(result?.serverError).toBe("Connect this provider in Settings first");
+  expect(mocks.discover).not.toHaveBeenCalled();
+});
+it("applies the release and access checks to connection tests", async () => {
+  expect((await testConnectionAction({ provider: "google" }))?.serverError).toBe("Version 0.1.0 supports OpenAI only.");
+  mocks.headers.mockResolvedValueOnce(new Headers({ host: "foreign.example", origin: "http://foreign.example" }));
+  expect((await testConnectionAction({ provider: "openai" }))?.serverError).toBe("Access denied");
+  expect(mocks.readKey).not.toHaveBeenCalled();
+  expect(mocks.discover).not.toHaveBeenCalled();
 });

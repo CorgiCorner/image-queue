@@ -112,10 +112,24 @@
 .settings-empty { margin: 0; color: var(--muted-fg); font-size: 13px; line-height: 1.5; }
 .settings-subsection > .settings-empty:last-child { padding-bottom: 8px; }
 .settings-list { margin: 0; padding: 0; list-style: none; }
-.settings-list-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; }
+.settings-list-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; }
 .settings-list-row + .settings-list-row { border-top: 1px solid var(--border); }
 .settings-list-name { font-weight: 500; }
-.settings-list-meta { margin-right: auto; color: var(--muted-fg); }
+/* The model count and a connection test result share one cell; a result replaces the count in place. */
+.settings-list-meta { display: grid; flex: 1 1 0; min-width: min(100%, 12rem); line-height: 1.5; overflow-wrap: anywhere; color: var(--muted-fg); }
+.settings-meta-text { grid-area: 1 / 1; }
+.settings-meta-text[data-result] { color: var(--foreground); }
+/* Only a replacing text fades in; the count shown on load does not. */
+.settings-meta-text:not(:only-child, .settings-meta-leaving) { animation: settings-meta-in var(--motion-fast) var(--ease-out); }
+/* The replaced text ends hidden even when no animation runs. */
+.settings-meta-leaving { opacity: 0; animation: settings-meta-out var(--motion-fast) var(--ease-out); }
+@keyframes settings-meta-in { from { opacity: 0; } }
+@keyframes settings-meta-out { from { opacity: 1; } }
+.settings-list-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Both labels stack in one cell, so the button keeps the width of "Test connection" while a test runs. */
+.settings-test-labels { display: grid; }
+.settings-test-label { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.settings-test-label:not([data-active]) { visibility: hidden; }
 .settings-table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.4; }
 .settings-table :is(th, td) { padding: 8px 12px 8px 0; border-top: 1px solid var(--border); text-align: left; font-weight: 450; }
 .settings-table thead th { padding-top: 0; border-top: 0; color: var(--muted-fg); font-size: 12px; font-weight: 500; }

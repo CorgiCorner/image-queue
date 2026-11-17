@@ -9,7 +9,7 @@ export function planImageFit(
     }
   }
   if (source.width < target.width || source.height < target.height) {
-    throw new UserFacingError("The generated image is too small for the requested size without upscaling");
+    throw new UserFacingError(`The generated image is too small for the requested size without upscaling (received ${source.width}×${source.height}; requested ${target.width}×${target.height}). Inspect the original before retrying.`);
   }
   const scale = Math.min(source.width / target.width, source.height / target.height);
   const width = Math.min(source.width, Math.round(target.width * scale));

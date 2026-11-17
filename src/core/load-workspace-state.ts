@@ -37,6 +37,7 @@ export async function loadWorkspaceState() {
   const localRunner=(globalThis as typeof globalThis & {imageQueueLocalRunner?: {status():{mode:string;running:number;enabled:number;desiredWorkers?:number;paused?:boolean;blockedReason?:string;blockedJobId?:string;canResume?:boolean;resumeAt?:string}}}).imageQueueLocalRunner?.status();
   return {
     localRunner,
+    generationSource: await (await import("./generation-preference")).readGenerationPreference(store),
     platformSupport: cloud ? undefined : platformSupport(process.platform, process.arch),
     mcpLaunch: cloud || !paths ? undefined : localMcpLaunch(paths, await (await import("../storage/node-executable")).nodeExecutable()),
     paths,

@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
 import { localMcpLaunch } from "../src/core/mcp-launch";
+import { mcpConfigurations } from "../src/core/mcp-configuration";
 afterEach(()=>vi.unstubAllEnvs());
 const paths={queueDirectory:"/workspace/custom-queue",referenceDirectories:["/workspace/references","/workspace/project two"]};
 it("carries the running workspace and credential-file override without key values",()=>{
@@ -26,3 +27,10 @@ it("preserves a configured dashboard origin without copying URL credentials or t
 });
 
 it("uses an explicitly resolved stable Node executable",()=>{expect(localMcpLaunch(paths,"/opt/homebrew/bin/node").command).toBe("/opt/homebrew/bin/node");});
+
+it("preserves scheduled execution in copied client configurations", () => {
+  vi.stubEnv("IMAGE_QUEUE_EXECUTOR", "scheduled");
+  const [codex, claude] = mcpConfigurations(localMcpLaunch(paths));
+  expect(codex.value).toContain('"IMAGE_QUEUE_EXECUTOR" = "scheduled"');
+  expect(JSON.parse(claude.value).mcpServers["image-queue"].env.IMAGE_QUEUE_EXECUTOR).toBe("scheduled");
+});

@@ -1,3 +1,4 @@
+import { isSizeMismatchError, sizeMismatchRecoveryMessage } from "../core/job-recovery";
 import { configuration } from "../core/config";
 import { readLocalRunnerSettings } from "../core/local-runner-settings";
 import type { Storage } from "../storage/types";
@@ -19,6 +20,8 @@ export async function executionStatus(store: Storage) {
     requiresUserAction: paused || (!!blockedReason && !resumeAt),
     nextAction: resumeAt && !paused
       ? "The runner will check quota again at resumeAt. The failed or uncertain image is not retried automatically."
+      : isSizeMismatchError(blockedReason)
+        ? sizeMismatchRecoveryMessage
       : blockedReason
         ? "Tell the user generation stopped and why. Open Settings > Codex queue, inspect the stopped image and follow recovery. Fix safe pre-generation errors and submit one corrected request; preserve an intentional pause. Ask the user to resume the remaining queue after an uncertain attempt. Do not retry an uncertain image without acknowledgement."
         : paused

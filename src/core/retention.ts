@@ -21,20 +21,7 @@ export async function changeRetention(
     if ([...ids].some((id) => !jobs.some((job) => job.id === id)))
       throw new UserFacingError(
         "Selected image no longer exists. Refresh and try again.");
-    const stacks = new Set(
-      jobs
-        .filter((job) => ids.has(job.id))
-        .map((job) => job.stackId)
-        .filter(Boolean),
-    );
-    const selected = jobs.filter(
-      (job) =>
-        ids.has(job.id) ||
-        (parsed.includeStack && job.stackId && stacks.has(job.stackId)),
-    );
-    const eligible = selected.filter(
-      (job) => !["queued", "running"].includes(job.status),
-    );
+    const { selected, eligible } = retentionSelection(jobs, parsed.ids, parsed.includeStack);
     const now = new Date().toISOString();
     const destinations = new Map<
       string,
@@ -124,6 +111,14 @@ export async function changeRetention(
         .map((job) => job.id),
     };
   });
+}
+
+/** Which jobs a retention operation selects, and which of them it moves: active requests stay. The client uses it to hide moved cards before the server confirms. */
+export function retentionSelection(jobs: Job[], requested: readonly string[], includeStack: boolean): { selected: Job[]; eligible: Job[] } {
+  const ids = new Set(requested);
+  const stacks = new Set(jobs.filter((job) => ids.has(job.id)).map((job) => job.stackId).filter(Boolean));
+  const selected = jobs.filter((job) => ids.has(job.id) || (includeStack && job.stackId && stacks.has(job.stackId)));
+  return { selected, eligible: selected.filter((job) => !["queued", "running"].includes(job.status)) };
 }
 
 export function visibleJobs(

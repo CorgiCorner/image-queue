@@ -1,4 +1,5 @@
 "use client";
+import { isSizeMismatchError } from "@/core/job-recovery";
 import { reservationTime } from "@/core/reservation-time";
 import { customSizesStorageKey, readCustomSizes, rememberCustomSize } from "@/core/custom-sizes";
 import { modelsWithSizeProfiles } from "@/core/model-catalog";
@@ -7,7 +8,7 @@ import { isReserved, jobStatusLabels as labels } from "@/core/job-status";
 import { orderedVersions } from "@/core/version-order";
 import { annotationSelection } from "@/core/annotation";
 import { aspectRatios, resolveModelSize, type SizeProfile } from "@/core/size-intent";
-import { visibleJobs } from "@/core/retention";
+import { retentionSelection, visibleJobs } from "@/core/retention";
 import { MAX_TAG_LENGTH, tagCounts } from "@/core/tags";
 import { defaultGenerationSource, jobCounts, pulseIsFresh, queueWaitNotice, workerHealth, workerStatusMessage } from "@/core/workspace-state";
 import { modelSizes, sizeLabel, queueSizes, ratioFirstLabel, closestAspectSize } from "@/core/model-options";
@@ -20,12 +21,14 @@ import { animateHeightChange } from "@/lib/height-motion";
 import { ReferenceStrip } from "./reference-strip";
 import { ChangingLabel } from "./changing-label";
 import { animateRetainedCards } from "@/lib/retention-motion";
+import { anyTileVisible, galleryVisibleArea } from "@/lib/tile-visibility";
 import { GalleryContent } from "./gallery-content";
 import { SelectionToolbar } from "./selection-toolbar";
 import { Notification } from "./notification";
 import { SavedStatus } from "./saved-status";
 import { CopyButton } from "./copy-button";
 import { SettingsNav } from "./settings-nav";
+import { ConnectedProviderRow } from "./connected-provider-row";
 import { AgentConnection } from "./agent-connection";
 import { Progress } from "./ui/progress";
 import { ImageNotes } from "./image-notes";
@@ -73,6 +76,7 @@ import {
   pauseLocalRunnerAction,
   pathSettingsAction,
   requestImageAction,
+  generationSourceAction,
   retryBlockedQueueAction,
   retryImageAction,
   markUncertainFailedAction,
@@ -110,6 +114,7 @@ import { Gallery } from "./gallery";
 import { ImagePreview } from "./image-preview";
 
 type State = {
+  generationSource?: {source:"queue"|"api";provider?:"openai";model?:string};
   platformSupport?: {tested:boolean;platform:string;architecture:string;warning?:string};
   localRunner?: {mode:string;running:number;enabled:number;desiredWorkers?:number;paused?:boolean;blockedReason?:string;blockedJobId?:string;canResume?:boolean;resumeAt?:string};
   mcpLaunch?: McpLaunch;
@@ -265,6 +270,7 @@ export function Workspace({
     }
   }
   const [composerCollapsed, setComposerCollapsed] = useState(false);
+  const workspaceRoot = useRef<HTMLDivElement>(null);
   const workspaceMain = useRef<HTMLElement>(null);
   const composerWrap = useRef<HTMLDivElement>(null);
   const composerSurface = useRef<HTMLFormElement>(null);
@@ -273,15 +279,20 @@ export function Workspace({
   const galleryHeading = useRef<HTMLHeadingElement>(null);
   const directDetailFocus = useRef(Boolean(initialJob));
   useLayoutEffect(() => {
+    const root = workspaceRoot.current;
     const main = workspaceMain.current;
     const composer = composerWrap.current;
-    if (!main || !composer) return;
+    if (!root || !main || !composer) return;
     const update = () => {
-      const clearance = Math.ceil(composer.getBoundingClientRect().height);
-      const formHeight = composerSurface.current?.getBoundingClientRect().height ?? 0;
+      const wrap = composer.getBoundingClientRect();
+      const clearance = Math.ceil(wrap.height);
+      const form = composerSurface.current?.getBoundingClientRect();
       // The first layout effect owns initialization, so mount never animates from a partial height.
-      if (composerHeight.current) composerHeight.current = formHeight;
+      if (composerHeight.current) composerHeight.current = form?.height ?? 0;
       main.style.setProperty("--composer-clearance", `${clearance}px`);
+      // Notifications stand just above the editor's top edge; a hidden editor leaves them in the corner.
+      if (clearance && form?.height) root.style.setProperty("--toast-editor-offset", `${Math.ceil(wrap.bottom - form.top)}px`);
+      else root.style.removeProperty("--toast-editor-offset");
     };
     update();
     const observer = new ResizeObserver(update);
@@ -289,6 +300,7 @@ export function Workspace({
     return () => {
       observer.disconnect();
       main.style.removeProperty("--composer-clearance");
+      root.style.removeProperty("--toast-editor-offset");
     };
   }, [settingsPage]);
   const draggedNavigation = useRef<{ collection: string; id: string } | null>(null);
@@ -390,11 +402,13 @@ export function Workspace({
     versionStrip.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({block:"nearest",inline:"nearest"});
   }, [selected?.id]);
   const [source, setSource] = useState<"queue" | "api">(defaultGenerationSource(initialState ?? empty));
+  const [savingSource, setSavingSource] = useState(false);
+  const sourceSavePending = useRef(false);
   const priorComposerSource = useRef(source);
   const [provider, setProvider] = useState<
     "openai" | "google" | "gateway" | "openrouter"
   >("openai");
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState(initialState?.generationSource?.model ?? "");
   const [resolution, setResolution] = useState("");
   const [customDimensionsSelected, setCustomDimensionsSelected] = useState(false);
   const [sizeFallback, setSizeFallback] = useState<{ before: string; after: string } | null>(null);
@@ -419,14 +433,24 @@ export function Workspace({
   const [apiKey, setApiKey] = useState("");
   const [providerError, setProviderError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingRecovery, setPendingRecovery] = useState<{ jobId: string; action: "retry" | "mark-failed" }>();
+  const detailPendingRecovery = pendingRecovery?.jobId === detailJob?.id ? pendingRecovery?.action : undefined;
   const [notice, setNotice] = useState("");
   const [providerSuccess, setProviderSuccess] = useState("");
+  // Bumps per provider whenever its key is replaced, so a connection test of the old key is dropped.
+  const [keyRevisions, setKeyRevisions] = useState<Partial<Record<string, number>>>({});
   useEffect(() => {
     if (selected) setNotice("");
   }, [selected?.id]);
 
   const [undoHistory, setUndoHistory] = useState<string[]>([]);
   const undoId = undoHistory.at(-1);
+  // The notice text a retention action produced; only that notice offers Undo.
+  const [undoNotice, setUndoNotice] = useState<string>();
+  const showRetentionNotice = useCallback((message: string, undoable: boolean) => {
+    setNotice(message);
+    setUndoNotice(undoable ? message : undefined);
+  }, []);
   const undoPending = useRef(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [dark, setDark] = useState(true);
@@ -455,15 +479,15 @@ export function Workspace({
   const promptEmpty = !form.watch("prompt")?.trim();
   const pendingRestoreMotion = useRef(false);
   const pendingInsertionMotion = useRef(false);
-  const pendingRemovalMotion = useRef(false);
   const [restoreMotionRevision, setRestoreMotionRevision] = useState(0);
   const [removalMotionRevision, setRemovalMotionRevision] = useState(0);
   const [insertionMotionRevision, setInsertionMotionRevision] = useState(0);
+  const [leavingIds, setLeavingIds] = useState<ReadonlySet<string>>(() => new Set());
   const refresh = useCallback(async () => {
     const response = await fetch("/api/state");
     if (!response.ok) throw new Error("Could not load workspace");
     const state = await response.json();
-    if (!poolInitialized.current) setSource(defaultGenerationSource(state));
+    if (!poolInitialized.current) { setSource(defaultGenerationSource(state)); if(state.generationSource?.model) setModel(state.generationSource.model); }
     if (pendingRestoreMotion.current) {
       pendingRestoreMotion.current = false;
       setRestoreMotionRevision(value => value + 1);
@@ -471,10 +495,6 @@ export function Workspace({
     if (pendingInsertionMotion.current) {
       pendingInsertionMotion.current = false;
       setInsertionMotionRevision(value => value + 1);
-    }
-    if (pendingRemovalMotion.current) {
-      pendingRemovalMotion.current = false;
-      setRemovalMotionRevision(value => value + 1);
     }
     setHealthNow(Date.now());
     setData(state);
@@ -497,6 +517,28 @@ export function Workspace({
   useEffect(() => {
     if (!initialState) refresh().catch((e) => setNotice(e.message));
   }, [initialState, refresh]);
+  // Cards the operation will move leave as soon as their exit fade ends, inside the click's input window, so the
+  // neighbours closing in never counts as a layout shift. The server reply and the refresh only confirm it; anything
+  // the server did not move comes back with the refreshed state.
+  const retainCards = useCallback(async (ids: string[], operation: "archive" | "trash" | "restore", includeStack: boolean, onLeave?: () => void) => {
+    const leaving = retentionSelection(data.jobs, ids, includeStack).eligible.map(job => job.id);
+    const request = retentionAction({ids, operation, includeStack});
+    request.catch(() => {}); // Awaited below, after the fade; this only keeps an early rejection from reporting as unhandled.
+    const clearExit = await animateRetainedCards(leaving);
+    if (leaving.length) {
+      setRemovalMotionRevision(value => value + 1);
+      setLeavingIds(current => new Set([...current, ...leaving]));
+    }
+    onLeave?.();
+    try {
+      const result = await request;
+      const state = await refresh();
+      return {result, state};
+    } finally {
+      clearExit();
+      if (leaving.length) setLeavingIds(current => new Set([...current].filter(id => !leaving.includes(id))));
+    }
+  }, [data.jobs, refresh]);
   useEffect(() => {
     setSelected(current => {
       if (!current || !["queued", "running"].includes(current.status)) return current;
@@ -565,9 +607,9 @@ export function Workspace({
     return () => window.removeEventListener("keydown", listener);
   }, [selected]);
   const activeJobs = useMemo(() => visibleJobs(data.jobs), [data.jobs]);
-  const viewJobs = useMemo(() => retentionView === "active" && search
+  const viewJobs = useMemo(() => (retentionView === "active" && search
     ? data.jobs.filter(job => !job.trashedAt)
-    : visibleJobs(data.jobs, retentionView), [data.jobs, retentionView, search]);
+    : visibleJobs(data.jobs, retentionView)).filter(job => !leavingIds.has(job.id)), [data.jobs, retentionView, search, leavingIds]);
   const currentProject = data.projects.find((p) => p.id === project);
   const currentTopic = data.topics?.find((item) => item.id === topic);
   const hasSearch = Boolean(search.trim());
@@ -667,21 +709,17 @@ export function Workspace({
   const nextImage = detailSequence[detailIndex + 1];
   const retainDetail = useCallback(async (job: Job, operation: "archive" | "trash") => {
     try {
-      const result = await retentionAction({ids:[job.id],operation,includeStack:false});
+      const {result, state} = await retainCards([job.id], operation, false);
       showError(result);
       if (result?.data?.undoId) setUndoHistory(history => [...history, result.data!.undoId]);
-      const clearExit = await animateRetainedCards(result?.data?.changed ?? []);
-      if (result?.data?.changed.length) pendingRemovalMotion.current = true;
-      let state: typeof data;
-      try { state = await refresh(); } finally { clearExit(); }
       setSelected(current => current?.id === job.id
         ? result?.data?.changed.includes(job.id) ? null : state.jobs.find(candidate => candidate.id === job.id) ?? null
         : current);
-      setNotice(result?.data?.changed.includes(job.id)
+      showRetentionNotice(result?.data?.changed.includes(job.id)
         ? operation === "archive" ? "Image archived" : "Image moved to trash"
-        : "This request is active and cannot be moved yet");
+        : "This request is active and cannot be moved yet", Boolean(result?.data?.undoId));
     } catch (error) { setNotice((error as Error).message); }
-  }, [refresh]);
+  }, [retainCards, showRetentionNotice]);
   useEffect(() => {
     if (!selected || stackPicker) return;
     const navigate = (event: KeyboardEvent) => {
@@ -858,6 +896,31 @@ export function Workspace({
     if (result?.serverError || result?.validationErrors)
       throw new Error(result.serverError ?? "Please check the form fields");
   };
+  const changeDefaultSource = async (next: "queue" | "api", nextModel?: string) => {
+    if (sourceSavePending.current) return;
+    sourceSavePending.current = true;
+    const previous = source;
+    const previousModel = model;
+    setSavingSource(true);
+    setSource(next);
+    if (nextModel) setModel(nextModel);
+    try {
+      const result = await generationSourceAction({ source: next, provider: "openai", ...(nextModel ? { model: nextModel } : {}) });
+      showError(result);
+      if (result?.data) {
+        setData(current => ({ ...current, generationSource: result.data }));
+        if (result.data.model) setModel(result.data.model);
+      }
+      setNotice("Default source saved. Existing requests keep their source.");
+    } catch (error) {
+      setSource(previous);
+      setModel(previousModel);
+      setNotice((error as Error).message);
+    } finally {
+      sourceSavePending.current = false;
+      setSavingSource(false);
+    }
+  };
   const undoLastRetention = useCallback(async () => {
     if (!undoId || undoPending.current) return;
     undoPending.current = true;
@@ -865,12 +928,13 @@ export function Workspace({
     try {
       showError(await undoRetentionAction({id:undoId}));
       setUndoHistory(history => history.filter(id => id !== undoId));
-      setNotice("Action undone");
+      // Earlier retention actions stay undoable from this notice.
+      showRetentionNotice("Action undone", true);
       pendingRestoreMotion.current = true;
       await refresh();
     } catch (error) {setNotice((error as Error).message);}
     finally {undoPending.current = false; setUndoBusy(false);}
-  }, [undoId, refresh]);
+  }, [undoId, refresh, showRetentionNotice]);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       const target = event.target;
@@ -904,6 +968,14 @@ export function Workspace({
     } catch (error) { setNotice((error as Error).message); }
     finally { directoryPickerPending.current = false; setPickingDirectory(null); }
   }
+  const [pendingConfirmation, setPendingConfirmation] = useState<{ ids: string[]; message: string } | null>(null);
+  useEffect(() => {
+    if (!pendingConfirmation) return;
+    setPendingConfirmation(null);
+    const main = workspaceMain.current;
+    if (main && anyTileVisible(main, pendingConfirmation.ids, galleryVisibleArea(main))) return;
+    setNotice(pendingConfirmation.message);
+  }, [pendingConfirmation]);
   const requestInFlight = useRef(false);
   async function submit(values: z.infer<typeof formSchema>) {
     if (requestInFlight.current) return;
@@ -920,6 +992,7 @@ export function Workspace({
     setNotice("");
     try {
       const [width, height] = size.split("x").map(Number);
+      const created: string[] = [];
       for (let variant = 0; variant < Number(variants); variant++) {
         const result = await requestImageAction({
           ...values,
@@ -941,6 +1014,7 @@ export function Workspace({
           idempotencyKey: `${requestKey.current}-${variant}`,
         });
         showError(result);
+        if (result?.data?.id) created.push(result.data.id);
       }
       requestKey.current = crypto.randomUUID();
       if (form.getValues("prompt") === values.prompt) form.reset();
@@ -949,7 +1023,8 @@ export function Workspace({
       pendingInsertionMotion.current = true;
       try {
         await refresh();
-        setNotice(confirmation);
+        // Checked once after the refreshed gallery commits; a visible new tile is its own confirmation.
+        setPendingConfirmation({ ids: created, message: confirmation });
       } catch {
         setNotice(`${confirmation}. Could not refresh the workspace.`);
       }
@@ -1301,6 +1376,7 @@ export function Workspace({
   return (
     <TooltipProvider>
     <div
+      ref={workspaceRoot}
       className={`workspace ${mobileMenu ? "mobile-menu-open" : ""} ${composerExpanded ? "composer-expanded" : ""}`}
     >
       <Button
@@ -1682,16 +1758,10 @@ export function Workspace({
             if (!raw) return;
             event.preventDefault();
             try {
-              const result = await retentionAction({ ids: JSON.parse(raw), operation: view, includeStack: stacked });
+              const {result} = await retainCards(JSON.parse(raw), view, stacked, () => setSelectedIds([]));
               showError(result);
-              const clearExit = await animateRetainedCards(result?.data?.changed ?? []);
-              if (result?.data?.changed.length) pendingRemovalMotion.current = true;
-              try {
-                if (result?.data?.undoId) setUndoHistory(history => [...history, result.data!.undoId]);
-                setSelectedIds([]);
-                setNotice(`${result?.data?.changed.length ?? 0} moved to ${view}. ${result?.data?.skipped.length ?? 0} skipped.`);
-                await refresh();
-              } finally { clearExit(); }
+              if (result?.data?.undoId) setUndoHistory(history => [...history, result.data!.undoId]);
+              showRetentionNotice(`${result?.data?.changed.length ?? 0} moved to ${view}. ${result?.data?.skipped.length ?? 0} skipped.`, Boolean(result?.data?.undoId));
             } catch (error) {
               setNotice((error as Error).message);
             }
@@ -1701,7 +1771,7 @@ export function Workspace({
           <div className="queue-health">
             <div>
               Codex queue
-              <span aria-live="polite" aria-atomic="true"><ChangingLabel value={data.cloud ? "Local companion required" : defaultGenerationSource(data) === "api" ? "Not configured" : health} /></span>
+              <span aria-live="polite" aria-atomic="true"><ChangingLabel value={data.cloud ? "Local companion required" : (!data.localRunner && !data.pulses.length && !data.jobs.some(job => job.source === "queue")) ? "Not configured" : health} /></span>
             </div>
           </div>
           <Button
@@ -1802,15 +1872,14 @@ export function Workspace({
             <Tooltip label="Like image-queue? Give it a star."><a className={buttonVariants({ variant: "ghost", size: "icon-sm", className: "top-link top-link-github" })} aria-label="image-queue on GitHub" href={projectLinks.repository} target="_blank" rel="noreferrer">
               <GithubLogo size={14} />
             </a></Tooltip>
-            <Button
+            <Tooltip label="Let your coding agent request images and use your gallery."><Button
               variant="outline"
               size="sm"
-              title="Let your coding agent request images and use your gallery."
               aria-label="Connect agent"
               onClick={() => router.push("/settings#agent-connection")}
             >
               <Terminal size={14} /> <span>Connect agent</span>
-            </Button>
+            </Button></Tooltip>
           </div>
         </header>
         {settingsPage ? (
@@ -1822,6 +1891,18 @@ export function Workspace({
               <h1>Settings</h1>
               <p>Providers, workers, storage and agent connections for this workspace.</p>
             </header>
+            <section id="generation-source" className="settings-card" aria-labelledby="generation-source-title">
+              <header className="settings-card-header"><h2 id="generation-source-title">Default generation source</h2><p>Used for new requests in the editor and by agents that do not specify a source. Existing requests keep their source.</p></header>
+              <div className="settings-row">
+                <div className="settings-row-text">
+                  <Label htmlFor="default-generation-source">Source</Label>
+                  <span className="settings-row-hint">Changing this setting does not start generation or resume a paused queue.</span>
+                </div>
+                <div className="settings-row-control">
+                  <SelectInput id="default-generation-source" label="Default generation source" className="w-full" disabled={savingSource} value={data.generationSource?.source ?? defaultGenerationSource(data)} onValueChange={value => void changeDefaultSource(value as typeof source)} options={[{ value: "api", label: "OpenAI API · billed to your key" }, { value: "queue", label: "Codex · your ChatGPT plan", disabled: data.cloud }]} />
+                </div>
+              </div>
+            </section>
             <section id="provider-connection" className="settings-card" aria-labelledby="provider-connection-title">
               <header className="settings-card-header">
                 <h2 id="provider-connection-title">Providers</h2>
@@ -1836,27 +1917,20 @@ export function Workspace({
                   <p className="settings-empty">No provider connected yet.</p>
                 ) : (
                   <ul className="settings-list">
-                    {connectedProviders.map((name) => {
-                      const count = data.models.filter((entry) => entry.provider === name).length;
-                      return (
-                        <li key={name} className="settings-list-row">
-                          <span className="settings-list-name">
-                            {providerOptions.find((option) => option.value === name)?.label ?? name}
-                          </span>
-                          <span className="settings-list-meta">{count} {count === 1 ? "model" : "models"}</span>
-                          <Button
-                            variant="outline"
-                            onClick={async () => {
-                              const result = await disconnectAction({ provider: name });
-                              if (result.serverError) setNotice(result.serverError);
-                              else await refresh();
-                            }}
-                          >
-                            Disconnect
-                          </Button>
-                        </li>
-                      );
-                    })}
+                    {connectedProviders.map((name) => (
+                      <ConnectedProviderRow
+                        key={name}
+                        provider={name}
+                        label={providerOptions.find((option) => option.value === name)?.label ?? name}
+                        count={data.models.filter((entry) => entry.provider === name).length}
+                        revision={keyRevisions[name] ?? 0}
+                        onDisconnect={async () => {
+                          const result = await disconnectAction({ provider: name });
+                          if (result.serverError) setNotice(result.serverError);
+                          else await refresh();
+                        }}
+                      />
+                    ))}
                   </ul>
                 )}
               </div>
@@ -1870,6 +1944,7 @@ export function Workspace({
                   try {
                     const result = await connectAction({ provider, apiKey });
                     showError(result);
+                    setKeyRevisions(current => ({ ...current, [provider]: (current[provider] ?? 0) + 1 }));
                     setApiKey("");
                     const discovered = result?.data ?? [];
                     setData(current => ({ ...current, models: [
@@ -2307,13 +2382,12 @@ export function Workspace({
                 : "Pin"}{" "}
               {topic ? "topic" : "project"}
             </Button>)}
-                {!queuePage && retentionView === "active" && <Button
-                  title="Add existing images to your gallery."
+                {!queuePage && retentionView === "active" && <Tooltip label="Add existing images to your gallery."><Button
                   variant="outline"
                   onClick={() => importInput.current?.click()}
                 >
                   Import images
-                </Button>}
+                </Button></Tooltip>}
                 {retentionView === "trash" && viewJobs.length > 0 && (
                   <Button variant="outline" onClick={() => {
                     setNotice("");
@@ -2332,7 +2406,7 @@ export function Workspace({
                 data.localRunner.blockedReason ? (
                 <div className="queue-paused-notice" role="status">
                   <Clock3 size={20} aria-hidden="true" />
-                  <div><strong>Queue stopped — action needed</strong><p>{workerStatusMessage(data.localRunner.blockedReason)} {data.localRunner.resumeAt ? "Queued images will resume automatically after the limit resets." : "Nothing is generating. Waiting images stay in the queue until you resume it."}</p></div>
+                  <div><strong>{isSizeMismatchError(data.localRunner.blockedReason) ? "Codex queue stopped — image size mismatch" : "Queue stopped — action needed"}</strong><p>{isSizeMismatchError(data.localRunner.blockedReason) ? `The image was generated${stoppedJob?.providerResultSize ? ` at ${stoppedJob.providerResultSize.width}×${stoppedJob.providerResultSize.height}` : ""}, but does not match the requested size. Inspect the original before retrying. API requests can still run.` : <>{workerStatusMessage(data.localRunner.blockedReason)} {data.localRunner.resumeAt ? "Queued images will resume automatically after the limit resets." : data.localRunner.running > 0 ? `${data.localRunner.running} images are still finishing. New Codex requests wait until you resume.` : "Nothing is generating. Waiting images stay in the queue until you resume it."}</>}</p></div>
                   {stoppedJob && <Button variant="outline" onClick={() => setSelected(stoppedJob)}>Inspect stopped image</Button>}
                   <Link className={buttonVariants({ variant: "secondary" })} href="/settings#worker-pool" prefetch>Manage workers</Link>
                 </div>
@@ -2415,15 +2489,10 @@ export function Workspace({
                       }}>Retry</Button>}
                       {([...(retentionView === "active" ? ["archive"] : ["restore"]), ...(retentionView !== "trash" ? ["trash"] : [])] as ("archive"|"trash"|"restore")[]).map(operation => <Button key={operation} variant={retentionView === "trash" && operation === "restore" ? "default" : "outline"} onClick={async () => {
                         try {
-                          const result = await retentionAction({ids:selectedIds,operation,includeStack:stacked});
+                          const {result} = await retainCards(selectedIds, operation, stacked, () => setSelectedIds([]));
                           showError(result);
-                          const clearExit = await animateRetainedCards(result?.data?.changed ?? []);
-                          if (result?.data?.changed.length) pendingRemovalMotion.current = true;
-                          try {
-                            if (result?.data?.undoId) setUndoHistory(history => [...history, result.data!.undoId]);
-                            setNotice(`${result?.data?.changed.length ?? 0} items updated; ${result?.data?.skipped.length ?? 0} active requests skipped`);
-                            setSelectedIds([]);await refresh();
-                          } finally { clearExit(); }
+                          if (result?.data?.undoId) setUndoHistory(history => [...history, result.data!.undoId]);
+                          showRetentionNotice(`${result?.data?.changed.length ?? 0} items updated; ${result?.data?.skipped.length ?? 0} active requests skipped`, Boolean(result?.data?.undoId));
                         } catch(error) {setNotice((error as Error).message);}
                       }}>{operation === "archive" ? "Archive" : operation === "trash" ? "Move to trash" : "Restore"}</Button>)}
                       {retentionView === "trash" && <Button variant="destructive" onClick={() => {setNotice("");setPurgeError("");setRemoveExternal(false);setPurgeProgress({ processed: 0, deleted: 0 });setPurgeIds([...selectedIds]);}}>Delete permanently</Button>}
@@ -2733,10 +2802,9 @@ export function Workspace({
                     <div>
                       <SelectInput
                         label="Generation source"
+                        disabled={savingSource}
                         value={source}
-                        onValueChange={(value) =>
-                          setSource(value as typeof source)
-                        }
+                        onValueChange={(value) => void changeDefaultSource(value as typeof source)}
                         options={[
                           {
                             value: "queue",
@@ -2777,14 +2845,15 @@ export function Workspace({
                         />
                         <SelectInput
                           label="Image model"
+                          disabled={savingSource}
                           className="compact-select model-select"
                           value={model}
-                          onValueChange={value => { setModel(value); setResolution(""); }}
+                          onValueChange={value => { setResolution(""); void changeDefaultSource("api", value); }}
                           placeholder={models.length ? "Select model" : "No models available"}
                           options={models.map((model) => ({
                             value: model.id,
                             label: model.name,
-                            disabled: refs.length > 0 && !model.references,
+                            disabled: !model.sizeProfile || (refs.length > 0 && !model.references),
                           }))}
                         />
                       </>
@@ -2882,7 +2951,7 @@ export function Workspace({
           <Notification message={notice} onDismiss={() => setNotice("")}
             action={notice === "Connect this provider in Settings first"
               ? <a href="/settings#provider-connection" className={buttonVariants({ variant: "outline", size: "sm" })}>Open settings</a>
-              : undoId ? <Button variant="outline" size="sm" disabled={undoBusy} onClick={() => void undoLastRetention()}>Undo</Button> : undefined}
+              : undoId && notice === undoNotice ? <Button variant="outline" size="sm" disabled={undoBusy} onClick={() => void undoLastRetention()}>Undo</Button> : undefined}
           />
         )}
       <Dialog open={newProject} onOpenChange={(open) => {
@@ -3069,7 +3138,11 @@ export function Workspace({
                   <Button variant="outline" onClick={async () => {
                     try {
                       const result=await retentionAction({ids:[detailJob.id],operation:"restore",includeStack:false});showError(result);
-                      if(result?.data?.undoId) setUndoHistory(history=>[...history,result.data!.undoId]);
+                      if(result?.data?.undoId) {
+                        setUndoHistory(history=>[...history,result.data!.undoId]);
+                        // This restore has no notice of its own; a showing notice's Undo must not revert it.
+                        setUndoNotice(undefined);
+                      }
                       const state = await refresh();
                       setSelected(current => current?.id === detailJob.id
                         ? state.jobs.find((job: Job) => job.id === detailJob.id) ?? null
@@ -3201,11 +3274,10 @@ export function Workspace({
                     </Button>
                   )}
                   {(detailJob.status === "done" || (detailJob.status === "blocked" && detailJob.blobKey)) && (
-                    <Button
+                    <Tooltip label="Download"><Button
                       variant="outline"
                       size="icon"
                       aria-label="Download"
-                      title="Download"
                       onClick={() => {
                         const a = document.createElement("a");
                         a.href = asset(detailJob, false);
@@ -3214,7 +3286,7 @@ export function Workspace({
                       }}
                     >
                       <Download size={15} />
-                    </Button>
+                    </Button></Tooltip>
                   )}
                   {detailJob.status === "queued" && !detailJob.outputPath && (
                     <Button
@@ -3356,8 +3428,9 @@ export function Workspace({
                 </div>}
                 {["blocked", "failed", "uncertain"].includes(detailJob.status) && !detailJob.archivedAt && !detailJob.trashedAt && <div className="detail-recovery field">
                   {detailJob.status === "uncertain" && <p>{detailJob.source === "queue" ? "Retrying may use your plan limit again." : "Retrying may be charged again."}</p>}
-                  <Button disabled={busy} onClick={async () => {
+                  <Button disabled={busy} aria-busy={detailPendingRecovery === "retry" || undefined} onClick={async () => {
                     setBusy(true);
+                    setPendingRecovery({ jobId: detailJob.id, action: "retry" });
                     try {
                       const result = await retryImageAction({id:detailJob.id,acknowledgeUncertain:detailJob.status === "uncertain"});
                       showError(result);
@@ -3365,8 +3438,8 @@ export function Workspace({
                       setSelected(result.data);
                       await refresh();
                     } catch (error) {setNotice((error as Error).message);}
-                    finally {setBusy(false);}
-                  }}>{busy ? "Retrying…" : detailJob.status === "uncertain" ? (detailJob.source === "queue" ? "Retry (may use your plan limit again)" : "Retry (may be charged again)") : "Retry"}</Button>
+                    finally {setPendingRecovery(undefined);setBusy(false);}
+                  }}>{detailPendingRecovery === "retry" ? "Retrying…" : detailJob.status === "uncertain" ? (detailJob.source === "queue" ? "Retry (may use your plan limit again)" : "Retry (may be charged again)") : "Retry"}</Button>
                   {detailJob.error && /referenc|missing.*(?:image|file)/i.test(detailJob.error) && <Button variant="outline" disabled={busy} onClick={() => {
                     form.setValue("prompt",detailJob.prompt);
                     setDestination(detailJob.projectId);
@@ -3379,11 +3452,12 @@ export function Workspace({
                     requestAnimationFrame(()=>fileInput.current?.click());
                   }}><Paperclip size={16} />Attach reference</Button>}
                   {detailJob.status === "uncertain" && <>
-                    <Button variant="outline" disabled={busy} onClick={async () => {
+                    <Button variant="outline" disabled={busy} aria-busy={detailPendingRecovery === "mark-failed" || undefined} onClick={async () => {
                       setBusy(true);
+                      setPendingRecovery({ jobId: detailJob.id, action: "mark-failed" });
                       try {const result=await markUncertainFailedAction({id:detailJob.id});showError(result);if(result?.data)setSelected(result.data);await refresh();}
                       catch(error){setNotice((error as Error).message);}
-                      finally{setBusy(false);}
+                      finally{setPendingRecovery(undefined);setBusy(false);}
                     }}>Mark as failed</Button>
                     {detailJob.source === "api" && <a className={buttonVariants({ variant: "outline" })} href={detailJob.provider === "openai" ? "https://platform.openai.com/usage" : detailJob.provider === "openrouter" ? "https://openrouter.ai/activity" : detailJob.provider === "google" ? "https://aistudio.google.com/" : "https://vercel.com/dashboard"} target="_blank" rel="noreferrer">Open provider dashboard</a>}
                   </>}
@@ -3400,8 +3474,8 @@ export function Workspace({
           <Input aria-label="Search parent images" placeholder="Search images…" value={stackSearch} onChange={event => {setStackSearch(event.target.value);setStackLimit(60);}} />
           {stackCandidates.length === 0 && <p role="status">No matching images</p>}
           <div className="stack-picker-grid">
-            {stackCandidates.slice(0,stackLimit).map(job => (
-              <Button key={job.id} variant="outline" className="stack-picker-item" aria-label={job.originalName || job.prompt || title(job)} title={job.prompt} disabled={joiningStack} onClick={async () => {
+            {stackCandidates.slice(0,stackLimit).map(job => {
+              const item = <Button key={job.id} variant="outline" className="stack-picker-item" aria-label={job.originalName || job.prompt || title(job)} disabled={joiningStack} onClick={async () => {
                 if (!selected || stackJoinPending.current) return;
                 stackJoinPending.current = true;
                 setJoiningStack(true);
@@ -3418,8 +3492,9 @@ export function Workspace({
                 <img src={`/api/asset?job=${encodeURIComponent(job.id)}&thumb=160`} srcSet={`/api/asset?job=${encodeURIComponent(job.id)}&thumb=160 160w, /api/asset?job=${encodeURIComponent(job.id)}&thumb=320 320w`} sizes="160px" alt="" loading="lazy" decoding="async" />
                 <span>{job.originalName || title(job)}</span>
                 <span className="stack-picker-meta">{new Date(job.createdAt).toLocaleDateString()}</span>
-              </Button>
-            ))}
+              </Button>;
+              return job.prompt ? <Tooltip key={job.id} label={job.prompt}>{item}</Tooltip> : item;
+            })}
           </div>
           {stackCandidates.length > stackLimit && <Button variant="outline" onClick={() => setStackLimit(limit => limit + 60)}>Show more images</Button>}
         </DialogContent>

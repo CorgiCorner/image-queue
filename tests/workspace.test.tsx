@@ -58,6 +58,7 @@ vi.mock("../src/actions", () => ({
   createProjectAction: vi.fn(async () => ({ data: { id: "new-project" } })),
   addNoteAction: vi.fn(async () => ({ data: { id: "saved-note" } })),
   requestImageAction: vi.fn(async () => ({ data: { id: "IMG-new" } })),
+  generationSourceAction: vi.fn(async ({source,model}: {source:"api"|"queue";model?:string})=>({data:{source,provider:"openai",...(model?{model}:{})}})),
   connectAction: vi.fn(async () => ({ data: [] })),
   tagImageAction: vi.fn(async () => ({})),
   editTagAction: vi.fn(async () => ({})),
@@ -71,6 +72,7 @@ vi.mock("../src/actions", () => ({
   retryBlockedQueueAction: vi.fn(async () => ({data:{queued:[],failures:[]}})),
   pathSettingsAction: vi.fn(async () => ({})),
   disconnectAction: vi.fn(async () => ({})),
+  testConnectionAction: vi.fn(async () => ({ data: { models: 3 } })),
   retentionAction: vi.fn(async () => ({data:{changed:["IMG-first"],skipped:[],undoId:"undo-one"}})),
   undoRetentionAction: vi.fn(async () => ({})),
 }));
@@ -84,7 +86,7 @@ vi.mock("../src/components/gallery", () => ({
         Select images
       </button>
       {jobs.map((job: any) => (
-        <button type="button" key={job.id} onClick={() => onOpen(job)}>
+        <button type="button" key={job.id} data-job-id={job.id} onClick={() => onOpen(job)}>
           Open {job.id}
         </button>
       ))}
@@ -714,6 +716,17 @@ it("disconnects a provider and changes the settings provider", async () => {
     expect(disconnectAction).toHaveBeenCalledWith({ provider: "openai" }),
   );
 });
+it("tests a connected provider beside its disconnect action", async () => {
+  const { testConnectionAction, disconnectAction } = await import("../src/actions");
+  render(<Workspace settingsPage />);
+  await screen.findByLabelText("API key");
+  const test = screen.getByRole("button", { name: "Test connection" });
+  expect(test.parentElement).toBe(screen.getByRole("button", { name: "Disconnect" }).parentElement);
+  fireEvent.click(test);
+  await screen.findByText("Connection works. 3 image models available.");
+  expect(testConnectionAction).toHaveBeenCalledWith({ provider: "openai" });
+  expect(disconnectAction).not.toHaveBeenCalled();
+});
 it("copies an output path and focuses the prompt", async () => {
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
@@ -986,6 +999,25 @@ it("keeps prior retention operations available after one undo", async () => {
   fireEvent.click(screen.getByRole("button",{name:"Undo"}));
   await waitFor(()=>expect(undoRetentionAction).toHaveBeenCalledWith({id:"first"}));
 });
+it("offers Undo only on the notice the retention action produced", async () => {
+  const {undoRetentionAction}=await import("../src/actions");
+  await ready();
+  fireEvent.click(screen.getByRole("button",{name:"Select images"}));
+  fireEvent.click(screen.getByRole("button",{name:"Archive"}));
+  const archived=await screen.findByText("1 items updated; 0 active requests skipped");
+  expect(archived.closest(".toast")!.textContent).toContain("Undo");
+  fireEvent.change(screen.getByLabelText("Image prompt"),{target:{value:"A later request"}});
+  fireEvent.click(screen.getByLabelText("Generate image"));
+  const queued=await screen.findByText("Added to the Codex queue");
+  expect(screen.queryByRole("button",{name:"Undo"})).toBeNull();
+  expect(queued.closest(".toast")!.querySelectorAll("button")).toHaveLength(1);
+  // Keyboard undo still reaches the history.
+  const before=vi.mocked(undoRetentionAction).mock.calls.length;
+  fireEvent.keyDown(window,{key:"z",metaKey:true});
+  await waitFor(()=>expect(vi.mocked(undoRetentionAction).mock.calls.length).toBe(before+1));
+  expect(vi.mocked(undoRetentionAction)).toHaveBeenLastCalledWith({id:"undo-one"});
+  await screen.findByText("Action undone");
+});
 it("ignores a repeated Undo click while its request is pending", async () => {
   const {undoRetentionAction}=await import("../src/actions");
   let resolveUndo: (value: any) => void = () => {};
@@ -1243,6 +1275,22 @@ it("does not upload a failed image download as a reference", async () => {
   fireEvent.click(screen.getByRole("button",{name:"Use as reference"}));
   await screen.findAllByText("Could not load image reference");
   expect(fetcher.mock.calls.some(([url])=>url === "/api/upload")).toBe(false);
+});
+
+it("removes moved cards before the server replies and brings back what it did not move", async () => {
+  const {retentionAction}=await import("../src/actions");
+  let reply!: (value: unknown) => void;
+  vi.mocked(retentionAction).mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }) as any);
+  await ready();
+  fireEvent.click(screen.getByRole("button",{name:"Select images"}));
+  fireEvent.click(screen.getByRole("button",{name:"Archive"}));
+  // Neighbours close in while the click still counts as recent input, not after the server round trip.
+  await waitFor(()=>expect(screen.queryByRole("button",{name:"Open IMG-first"})).toBeNull());
+  expect(screen.getByRole("button",{name:"Open IMG-queued"})).toBeTruthy();
+  expect(screen.queryByText("2 selected")).toBeNull();
+  reply({data:{changed:[],skipped:["IMG-first"],undoId:"empty"}});
+  await screen.findByRole("button",{name:"Open IMG-first"});
+  await screen.findByText("0 items updated; 1 active requests skipped");
 });
 
 it("reports a skipped archive when the request became active", async () => {
@@ -2532,6 +2580,42 @@ it("shows explicit uncertain-result actions without automatically retrying",asyn
   await waitFor(()=>expect(retryImageAction).toHaveBeenCalledWith({id:"IMG-first",acknowledgeUncertain:true}));
 });
 
+it("marks only the failed action as pending while keeping the retry label stable", async () => {
+  const data = structuredClone(state);
+  Object.assign(data.jobs[0], { status: "uncertain", source: "api" });
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => data })));
+  const pending = Promise.withResolvers<Awaited<ReturnType<typeof markUncertainFailedAction>>>();
+  vi.mocked(markUncertainFailedAction).mockImplementationOnce(() => pending.promise);
+
+  await ready();
+  fireEvent.click(screen.getByRole("button", { name: "Open IMG-first" }));
+  const markFailed = await screen.findByRole("button", { name: "Mark as failed" });
+  fireEvent.click(markFailed);
+  expect(markUncertainFailedAction).toHaveBeenCalledWith({ id: "IMG-first" });
+  expect(retryImageAction).not.toHaveBeenCalled();
+  const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry (may be charged again)" });
+  expect(retry.disabled).toBe(true);
+  expect(retry.getAttribute("aria-busy")).not.toBe("true");
+  expect(markFailed.getAttribute("aria-busy")).toBe("true");
+
+  const failed: import("../src/core/schema").Job = {
+    ...data.jobs[0],
+    source: "api",
+    provider: "openai",
+    model: "gpt-image-1.5",
+    status: "failed",
+    idempotencyKey: "first",
+    requestHash: "original-request",
+    createdAt: "2026-11-17T12:00:00Z",
+    updatedAt: "2026-11-17T12:01:00Z",
+  };
+  Object.assign(data.jobs[0], failed);
+  await act(async () => pending.resolve({ data: failed }));
+  expect((await screen.findByRole<HTMLButtonElement>("button", { name: "Retry" })).disabled).toBe(false);
+  expect(screen.queryByRole("button", { name: "Mark as failed" })).toBeNull();
+  expect(retryImageAction).not.toHaveBeenCalled();
+});
+
 it("opens reference attachment with the blocked request's destination and prompt",async()=>{
   const data=structuredClone(state);
   Object.assign(data.jobs[0],{status:"blocked",error:"Reference unavailable",referenceIds:["missing-reference"]});
@@ -2727,12 +2811,12 @@ it("groups settings sections and marks the one in view", async () => {
   expect(groups).toEqual(["Generation", "Storage", "Library", "Agents"]);
   const links = [...nav.querySelectorAll("a")].map(link => [link.textContent, link.getAttribute("href")]);
   expect(links).toEqual([
-    ["Providers", "#provider-connection"], ["Worker pool", "#worker-pool"],
+    ["Default source", "#generation-source"], ["Providers", "#provider-connection"], ["Worker pool", "#worker-pool"],
     ["Project folders", "#project-folders"], ["Local directories", "#local-directories"],
     ["Tags and search", "#tag-settings"], ["Connect an agent", "#agent-connection"],
   ]);
   for (const [, href] of links) expect(document.querySelector(href!)).toBeTruthy();
-  expect(nav.querySelector("[aria-current=location]")?.textContent).toBe("Providers");
+  expect(nav.querySelector("[aria-current=location]")?.textContent).toBe("Default source");
   fireEvent.click(screen.getByRole("link", { name: "Worker pool" }));
   expect(nav.querySelector("[aria-current=location]")?.textContent).toBe("Worker pool");
   expect(screen.getAllByRole("columnheader").map(cell => cell.textContent)).toEqual(["Worker", "State", "Last heartbeat"]);
@@ -2829,4 +2913,131 @@ it("offers bulk Retry for selected blocked queue images in Everything", async ()
   await ready();
   fireEvent.click(screen.getByRole("button",{name:"Select images"}));
   expect(screen.getByRole("button",{name:/^Retry$/})).toBeTruthy();
+});
+
+describe("submit confirmation follows the new tile's visibility", () => {
+  const created = { ...state.jobs[1], id: "IMG-new", prompt: "A brand new tile" };
+  const rect = (top: number, height: number, bottom = top + height) =>
+    ({ top, bottom, left: 40, right: 240, width: 200, height, x: 40, y: top, toJSON() {} }) as DOMRect;
+  function serveCreatedJobAfterSubmit() {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => {
+        const next = structuredClone(state);
+        if (vi.mocked(requestImageAction).mock.calls.length) next.jobs.unshift(structuredClone(created));
+        return next;
+      },
+    })));
+  }
+  function placeNewTileAt(top: number) {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.jobId) return this.dataset.jobId === "IMG-new" ? rect(top, 200) : rect(320, 200);
+      return rect(0, 0);
+    });
+  }
+  async function submitPrompt() {
+    fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "A brand new tile" } });
+    fireEvent.click(screen.getByLabelText("Generate image"));
+    await waitFor(() => expect(requestImageAction).toHaveBeenCalledOnce());
+  }
+  afterEach(() => vi.restoreAllMocks());
+
+  it("shows no notice when the new tile appears on screen", async () => {
+    serveCreatedJobAfterSubmit();
+    placeNewTileAt(120);
+    await ready();
+    await submitPrompt();
+    await waitFor(() => expect(document.querySelector('[data-job-id="IMG-new"]')).not.toBeNull());
+    await act(async () => {});
+    expect(screen.queryByText("Added to the Codex queue")).toBeNull();
+    expect(document.querySelector(".toast")).toBeNull();
+  });
+
+  it("confirms the request when the new tile is scrolled out of view", async () => {
+    serveCreatedJobAfterSubmit();
+    placeNewTileAt(-900);
+    await ready();
+    await submitPrompt();
+    await screen.findByText("Added to the Codex queue");
+  });
+
+  it("confirms the request when the new tile sits behind the prompt editor", async () => {
+    serveCreatedJobAfterSubmit();
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("composer")) return rect(560, 180);
+      if (this.dataset.jobId) return rect(this.dataset.jobId === "IMG-new" ? 600 : 100, 200);
+      return rect(0, 0);
+    });
+    await ready();
+    await submitPrompt();
+    await screen.findByText("Added to the Codex queue");
+  });
+
+  it("confirms the request when a search hides the new tile", async () => {
+    serveCreatedJobAfterSubmit();
+    placeNewTileAt(120);
+    await ready();
+    fireEvent.change(screen.getByLabelText("Search images"), { target: { value: "panda" } });
+    await submitPrompt();
+    await screen.findByText("Added to the Codex queue");
+    expect(document.querySelector('[data-job-id="IMG-new"]')).toBeNull();
+  });
+});
+
+it("places notifications above the measured prompt editor and in the corner when it is hidden", async () => {
+  const observers: (() => void)[] = [];
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private callback: () => void) { observers.push(() => this.callback()); }
+    observe() {}
+    disconnect() {}
+  });
+  let editorHeight = 180;
+  const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const box = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 800, width: 800, height, x: 0, y: top, toJSON() {} }) as DOMRect;
+    if (this.classList.contains("composer-wrap")) return editorHeight ? box(768 - editorHeight - 49, editorHeight + 49) : box(0, 0);
+    if (this.classList.contains("composer")) return editorHeight ? box(768 - editorHeight - 21, editorHeight) : box(0, 0);
+    return box(0, 0);
+  });
+  const { container } = render(<Workspace />);
+  await screen.findByRole("button", { name: "Open IMG-first" });
+  const root = container.querySelector<HTMLElement>(".workspace")!;
+  // Editor top edge: its height plus the wrap's 21px bottom padding, measured from the viewport bottom.
+  expect(root.style.getPropertyValue("--toast-editor-offset")).toBe("201px");
+  editorHeight = 260;
+  act(() => observers.forEach(notify => notify()));
+  expect(root.style.getPropertyValue("--toast-editor-offset")).toBe("281px");
+  fireEvent.click(screen.getByRole("button", { name: "Minimize prompt editor" }));
+  editorHeight = 0;
+  act(() => observers.forEach(notify => notify()));
+  expect(root.style.getPropertyValue("--toast-editor-offset")).toBe("");
+  spy.mockRestore();
+});
+
+it("keeps local queue health visible when API is the saved default source",async()=>{
+ const loaded={...structuredClone(state),generationSource:{source:"api"},localRunner:{mode:"local",paused:true,enabled:0,running:0,desiredWorkers:5}};
+ const {container}=render(<Workspace initialState={loaded as never} />);
+ expect(screen.getByRole('combobox',{name:'Generation source'}).textContent).toContain('Your API key');
+ expect(container.querySelector('.queue-health [aria-live="polite"]')?.textContent).not.toBe('Not configured');
+});
+
+it("saves the default source in Settings without submitting or resuming work", async () => {
+  const { generationSourceAction, pauseLocalRunnerAction } = await import('../src/actions');
+  vi.mocked(generationSourceAction).mockClear();
+  vi.mocked(requestImageAction).mockClear();
+  vi.mocked(pauseLocalRunnerAction).mockClear();
+  render(<Workspace initialState={state as never} settingsPage />);
+  fireEvent.change(screen.getByRole('combobox', {name:'Default generation source'}), {target:{value:'api'}});
+  await waitFor(() => expect(generationSourceAction).toHaveBeenCalledWith({source:'api',provider:'openai'}));
+  await waitFor(() => expect((screen.getByRole('combobox', {name:'Default generation source'}) as HTMLSelectElement).value).toBe('api'));
+  expect(requestImageAction).not.toHaveBeenCalled();
+  expect(pauseLocalRunnerAction).not.toHaveBeenCalled();
+});
+
+it("restores the composer source when saving its default fails", async () => {
+  const {generationSourceAction} = await import('../src/actions');
+  vi.mocked(generationSourceAction).mockResolvedValueOnce({serverError:'Could not save source'} as never);
+  render(<Workspace initialState={{...state,generationSource:{source:'queue'}} as never} />);
+  fireEvent.change(screen.getByRole('combobox', {name:'Generation source'}), {target:{value:'api'}});
+  await waitFor(() => expect(screen.getByText('Could not save source')).toBeDefined());
+  expect((screen.getByRole('combobox', {name:'Generation source'}) as HTMLSelectElement).value).toBe('queue');
 });

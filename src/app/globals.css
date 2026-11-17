@@ -712,11 +712,25 @@ h1 span {
 .composer-hint strong {
   font-weight: 450;
 }
+/* Notifications sit in the bottom-right corner of the content, inset by its gutter.
+   --toast-editor-offset is the prompt editor's top edge measured from the viewport bottom
+   (set by the workspace while the editor is shown), so a toast never covers the editor. */
+.workspace {
+  --toast-inset: 35px;
+  --toast-start: 230px;
+  --toast-gap: calc(var(--spacing) * 2);
+  --toast-floor: var(--toast-inset);
+}
+.workspace:has(.composer-restore) {
+  /* Stand above the bottom-right "New image" button instead of covering it. */
+  --toast-floor: calc(24px + var(--spacing) * 8 + var(--toast-gap));
+}
 .toast {
   position: fixed;
-  bottom: 205px;
-  left: calc(50% + 115px);
-  transform: translateX(-50%);
+  right: var(--toast-inset);
+  bottom: max(var(--toast-floor), calc(var(--toast-editor-offset, 0px) + var(--toast-gap)));
+  width: max-content;
+  max-width: min(420px, calc(100vw - var(--toast-start) - 2 * var(--toast-inset)));
   z-index: 40;
   padding: 8px 10px 8px 15px;
   border: 1px solid var(--border);
@@ -726,7 +740,6 @@ h1 span {
   display: flex;
   align-items: center;
   gap: 15px;
-  max-width: calc(100vw - 30px);
   font-size: 12px;
 }
 .toast {
@@ -918,6 +931,9 @@ dd {
   .search input {
     width: 90px;
   }
+  .workspace {
+    --toast-inset: 24px;
+  }
 }
 @media (max-width: 850px) {
   .sidebar {
@@ -950,8 +966,9 @@ dd {
   .profile {
     margin-inline: -10px;
   }
-  .toast {
-    left: calc(50% + 95px);
+  .workspace {
+    --toast-inset: 20px;
+    --toast-start: 190px;
   }
 }
 @media (max-width: 600px) {
@@ -1101,9 +1118,10 @@ dd {
   .composer-hint > span:last-child {
     display: none;
   }
-  .toast {
-    left: 50%;
-    bottom: 230px;
+  .workspace {
+    /* The sidebar becomes a top bar here; align with the editor's 14px edges. */
+    --toast-inset: 14px;
+    --toast-start: 0px;
   }
   .detail-layout {
     grid-template-columns: 1fr;

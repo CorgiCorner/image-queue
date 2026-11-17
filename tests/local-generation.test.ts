@@ -4,6 +4,7 @@ import {join} from 'node:path';
 import {afterEach,expect,it,vi} from 'vitest';
 import sharp from 'sharp';
 import {MemoryStorage} from '../src/storage/memory';
+import {StorageLockBusy} from '../src/storage/types';
 const run=vi.hoisted(()=>vi.fn());
 vi.mock('../src/storage/codex-app-server',()=>({runCodexAppServer:run}));
 import {localGeneration} from '../src/storage/local-generation';
@@ -67,4 +68,32 @@ it('retains the working directory and original failure when archiving is unavail
  expect((await store.list<any>('local-attempts'))[0].artifactDirectory).toBe(attempt.artifactDirectory);
  roots.push(attempt.artifactDirectory);
  expect((await readFile(join(attempt.artifactDirectory,'original.png'))).length).toBeGreaterThan(0);
+});
+
+it('waits for a busy job lock to record dimensions after generation',async()=>{
+ const {store,generation}=await setup();
+ await store.put('jobs',job.id,{...job,status:'queued'});
+ await generation.prepare(job);
+ const lock=store.lock.bind(store);
+ let busy=true;
+ vi.spyOn(store,'lock').mockImplementation(async(key,work)=>{
+  if(key===job.id && busy){busy=false;throw new StorageLockBusy(key);}
+  return lock(key,work);
+ });
+ await expect(generation.generate(job,new AbortController().signal)).resolves.toMatchObject({width:32,height:32});
+ expect(await store.get('jobs',job.id)).toMatchObject({providerResultSize:{width:64,height:64}});
+ expect(run).toHaveBeenCalledTimes(1);
+ await generation.published(job.id);
+});
+
+it('retains the generated original and its dimensions when fitting rejects it',async()=>{
+ const {store,generation,root}=await setup();const request={...job,width:128,height:128};
+ await store.put('jobs',job.id,{...request,status:'queued'});
+ await generation.prepare(request);
+ await expect(generation.generate(request,new AbortController().signal)).rejects.toThrow('received 64×64; requested 128×128');
+ const attempt=(await store.list<any>('local-attempts'))[0];
+ const original=join(root,attempt.id,'original.png');
+ expect((await readFile(original)).length).toBeGreaterThan(0);
+ expect(await store.get('generation-artifacts',job.id)).toMatchObject({original});
+ expect(await store.get('jobs',job.id)).toMatchObject({providerResultSize:{width:64,height:64},requestedSize:{width:128,height:128}});
 });

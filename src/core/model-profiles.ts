@@ -27,10 +27,10 @@ export const verifiedModelProfiles: readonly VerifiedModelProfile[] = [{
   evidence: { generation: "docs/verification/gpt-image-2.6-flare.md#generation", referenceEdit: "docs/verification/gpt-image-2.6-flare.md#reference-edit" },
 }, {
   provider: "openai", model: "gpt-image-1.5",
-  references: true, transparency: false,
-  sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
+  references: true, transparency: true,
+  sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }, { width: 1024, height: 1536 }] },
   documentation: "https://developers.openai.com/api/docs/models/gpt-image-1.5",
-  verifiedAt: "2026-11-15T22:51:00Z",
+  verifiedAt: "2026-11-17T17:17:00Z",
   evidence: { generation: "docs/verification/gpt-image-1.5.md#generation", referenceEdit: "docs/verification/gpt-image-1.5.md#reference-edit" },
 }];
 

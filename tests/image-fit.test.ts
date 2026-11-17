@@ -17,3 +17,8 @@ it("rejects upscaling and invalid dimensions", () => {
   expect(() => planImageFit({ width: 1000, height: 1000 }, { width: 1080, height: 1920 })).toThrow("without upscaling");
   expect(() => planImageFit({ width: NaN, height: 1000 }, { width: 500, height: 500 })).toThrow("positive integers");
 });
+
+it("reports the actual and requested sizes for an undersized portrait", () => {
+  expect(() => planImageFit({ width: 851, height: 1847 }, { width: 1024, height: 1536 }))
+    .toThrow("received 851×1847; requested 1024×1536");
+});

@@ -19,6 +19,7 @@ if(x.method==='mcpServerStatus/list')result={data:[{name:'private',tools:${mode=
 emit({id:x.id,result});
 if(x.method==='turn/start'){
 if(${JSON.stringify(mode)}==='hang'){require('node:fs').writeFileSync(${JSON.stringify(join(root,'turn-started'))},'yes');return;}
+require('node:fs').writeFileSync(${JSON.stringify(join(root,'request'))},x.params.input[0].text);
 const request=JSON.parse(x.params.input[0].text);
 emit({method:'item/completed',params:{threadId:'thread',item:{type:'imageGeneration',status:'completed',savedPath:${JSON.stringify(image)},revisedPrompt:${mode==='rewrite'?'"changed"':'request.imageRequest'},inputImages:${mode==='wrong-hash'?`[{path:${JSON.stringify(image)},sha256:'0'.repeat(64)}]`:'[]'}}}});
 emit({method:'turn/completed',params:{threadId:'thread',turn:{status:'completed'}}});}
@@ -27,7 +28,7 @@ emit({method:'turn/completed',params:{threadId:'thread',turn:{status:'completed'
 }
 async function run(mode='ok',references:string[]=[]){
  const f=await fixture(mode);if(mode==='wrong-hash')references=[join(f.home,'generated_images','thread','image.png')];const old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.home;
- try{await runCodexAppServer({executable:f.executable,request:{workspace:f.root,output:join(f.root,'out.png'),receipt:join(f.root,'receipt'),prompt:'exact\nprompt',references,model:'gpt-6.1-sol',effort:'low'},signal:new AbortController().signal,eventLog:join(f.root,'events'),errorLog:join(f.root,'errors'),onStarted:async()=>{},timeoutMs:2000});return f;}finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;}
+ try{await runCodexAppServer({executable:f.executable,request:{workspace:f.root,output:join(f.root,'out.png'),receipt:join(f.root,'receipt'),prompt:'exact\nprompt',references,width:1024,height:1536,model:'gpt-6.1-sol',effort:'low'},signal:new AbortController().signal,eventLog:join(f.root,'events'),errorLog:join(f.root,'errors'),onStarted:async()=>{},timeoutMs:2000});return f;}finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;}
 }
 it('uses a read-only thread, disables inherited tools and collects verified event output',async()=>{
  const f=await run();const config=JSON.parse(await readFile(join(f.root,'config'),'utf8'));
@@ -37,6 +38,9 @@ it('uses a read-only thread, disables inherited tools and collects verified even
  expect(config.config['features.shell_tool']).toBe(false);
  expect(await readFile(join(f.root,'out.png'),'utf8')).toBe('png');
  expect(JSON.parse(await readFile(join(f.root,'receipt'),'utf8')).prompt).toBe('exact\nprompt');
+ const request=JSON.parse(await readFile(join(f.root,'request'),'utf8'));
+ expect(request).toMatchObject({imageRequest:'exact\nprompt',requestedSize:{width:1024,height:1536}});
+ expect(config.developerInstructions).toContain('never append dimensions');
 });
 it('rejects effective external tools before starting a generation',async()=>{await expect(run('tools')).rejects.toThrow('External generation tools');});
 it('rejects actual rewritten prompts',async()=>{await expect(run('rewrite')).rejects.toThrow('changed');});

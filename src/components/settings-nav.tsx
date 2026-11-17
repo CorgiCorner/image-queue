@@ -8,6 +8,7 @@ type Group = { label: string; sections: Section[] };
 function settingsGroups(cloud: boolean, localRunner: boolean): Group[] {
   return [
     { label: "Generation", sections: [
+      { id: "generation-source", label: "Default source" },
       { id: "provider-connection", label: "Providers" },
       { id: "worker-pool", label: localRunner ? "Codex queue" : "Worker pool" },
     ] },

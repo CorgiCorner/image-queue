@@ -1,4 +1,5 @@
 "use server";
+import { generationPreferenceSchema, saveGenerationPreference } from "@/core/generation-preference";
 import { UserFacingError, publicErrorMessage } from "@/core/user-facing-error";
 import { requireReleaseProvider } from "@/core/release-providers";
 import { applyVerifiedModelProfiles } from "@/core/model-profiles";
@@ -67,6 +68,13 @@ export const moveProjectAction = action
     revalidatePath(`/p/${project.id}`);
     return project;
   });
+export const generationSourceAction = action
+  .inputSchema(generationPreferenceSchema)
+  .action(async ({parsedInput})=>{
+    const saved=await saveGenerationPreference((await service()).store,parsedInput);
+    revalidatePath('/');return saved;
+  });
+
 export const requestImageAction = action
   .inputSchema(requestSchema)
   .action(async ({ parsedInput }) => {
@@ -171,6 +179,17 @@ export const connectAction = action
     await api.store.put("models", parsedInput.provider, models);
     revalidatePath("/");
     return models;
+  });
+/** Check a connected provider with its stored key; the key and the saved catalog stay as they are. */
+export const testConnectionAction = action
+  .inputSchema(settingsSchema.pick({ provider: true }))
+  .action(async ({ parsedInput }) => {
+    requireReleaseProvider(parsedInput.provider);
+    const api = await service();
+    const discovered = await discoverModels(parsedInput.provider, await readKey(api.store, parsedInput.provider));
+    if (!discovered.length)
+      throw new UserFacingError("The provider answered, but no supported image models are available for this key.");
+    return { models: discovered.length };
   });
 export const moveJobAction = action
   .inputSchema(z.object({ id: idSchema, projectId: idSchema }))

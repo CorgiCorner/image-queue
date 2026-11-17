@@ -1,7 +1,7 @@
 export type McpLaunch = { command: string; args: string[]; env?: Record<string, string> };
 const environmentKeys = [
   "IMAGE_QUEUE_STORAGE_DRIVER", "IMAGE_QUEUE_STORAGE_DIR", "IMAGE_QUEUE_QUEUE_DIR",
-  "IMAGE_QUEUE_REFERENCE_ROOTS", "IMAGE_QUEUE_CREDENTIALS_DIR", "IMAGE_QUEUE_DASHBOARD_URL",
+  "IMAGE_QUEUE_REFERENCE_ROOTS", "IMAGE_QUEUE_CREDENTIALS_DIR", "IMAGE_QUEUE_DASHBOARD_URL", "IMAGE_QUEUE_EXECUTOR",
 ];
 
 /** JSON strings are also valid TOML basic strings for these path values. */

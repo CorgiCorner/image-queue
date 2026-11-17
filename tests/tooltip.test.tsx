@@ -2,7 +2,9 @@
 import React from "react";
 import userEvent from "@testing-library/user-event";
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { Toggle, ToggleGroup } from "@ui-sdk/react/toggle";
@@ -78,4 +80,58 @@ it("reveals truncated text without adding an interactive element inside a tile",
   expect(screen.getAllByRole("button")).toHaveLength(1);
   await user.click(screen.getByText("Short reason"));
   expect(click).toHaveBeenCalledOnce();
+});
+
+it("waits 400 ms before the first tooltip and opens the following one instantly", async () => {
+  const user = userEvent.setup();
+  render(<TooltipProvider>
+    <Tooltip label="First hint"><button>First</button></Tooltip>
+    <Tooltip label="Second hint"><button>Second</button></Tooltip>
+  </TooltipProvider>);
+  await user.hover(screen.getByRole("button", {name: "First"}));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  const first = await screen.findByRole("tooltip", {}, {timeout: 1000});
+  expect(first.textContent).toBe("First hint");
+  expect(first.hasAttribute("data-instant")).toBe(false);
+  await user.unhover(screen.getByRole("button", {name: "First"}));
+  await user.hover(screen.getByRole("button", {name: "Second"}));
+  const second = await screen.findByRole("tooltip", {}, {timeout: 100});
+  expect(second.textContent).toBe("Second hint");
+  expect(second.getAttribute("data-instant")).toBe("delay");
+});
+
+it("keeps a disabled button disabled and its name unchanged inside a tooltip", () => {
+  const click = vi.fn();
+  render(<TooltipProvider><Tooltip label="Full prompt"><Button aria-label="Parent image" disabled onClick={click}>Parent</Button></Tooltip></TooltipProvider>);
+  const button = screen.getByRole("button", {name: "Parent image"}) as HTMLButtonElement;
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+  expect(button.disabled).toBe(true);
+  expect(button.hasAttribute("title")).toBe(false);
+  button.click();
+  expect(click).not.toHaveBeenCalled();
+});
+
+describe("tooltip motion", () => {
+  const css = readFileSync(join(__dirname, "..", "src/app/globals.css"), "utf8");
+  const rule = (selector: string) => {
+    const match = css.match(new RegExp(`(?:^|[}\\n])\\s*${selector.replace(/[.[\]]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
+    expect(match, selector).toBeTruthy();
+    return match![1];
+  };
+  it("fades in with the instant token and never moves", () => {
+    const base = rule(".tooltip-content");
+    expect(base).toMatch(/opacity:\s*1;/);
+    expect(base).toMatch(/transition:\s*opacity var\(--motion-instant\) var\(--ease-out\);/);
+    expect(base).not.toMatch(/transform|translate|scale/);
+    expect(rule(".tooltip-content[data-starting-style], .tooltip-content[data-ending-style]")).toMatch(/^\s*opacity:\s*0;\s*$/);
+    expect(rule(".tooltip-content[data-instant]")).toMatch(/transition:\s*none/);
+  });
+  it("ends visible under reduced motion with at most an 80 ms fade", () => {
+    const start = css.indexOf("@media (prefers-reduced-motion: reduce)");
+    const reduced = css.slice(start, css.indexOf("\n}\n", start));
+    expect(reduced).toMatch(/--motion-instant:\s*80ms/);
+    expect(reduced).toMatch(/transition-property:\s*opacity,/);
+    expect(reduced).not.toMatch(/tooltip-content[^{]*\{[^}]*opacity:\s*0/);
+  });
 });

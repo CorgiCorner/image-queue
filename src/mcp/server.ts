@@ -1,3 +1,5 @@
+import { version } from "../../package.json";
+import { generationPreferenceSchema, readGenerationPreference, saveGenerationPreference, type GenerationPreference } from "../core/generation-preference";
 import { jobRecovery } from "../core/job-recovery";
 import { applyVerifiedModelProfiles } from "../core/model-profiles";
 import { modelsWithSizeProfiles } from "../core/model-catalog";
@@ -15,18 +17,36 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { enqueue, refreshedJobs, retryImageJob, service } from "../core/runtime";
 import { idSchema, projectSchema, type Job, type Model, requestSchema, retryImageSchema } from "../core/schema";
+import { executionStatus } from "./execution-status";
+import type { Storage } from "../storage/types";
 
 const mcpRequestSchema = requestSchema.omit({ exactDimensions: true }).extend({
   width: requestSchema.shape.width.optional(),
   height: requestSchema.shape.height.optional(),
   aspectRatio: z.enum(aspectRatios).optional(),
+  source: requestSchema.shape.source.optional(),
 });
-async function normalizeRequest(input: z.infer<typeof mcpRequestSchema>, api: Awaited<ReturnType<typeof service>>) {
+async function normalizeRequest(raw: z.infer<typeof mcpRequestSchema>, store: Storage, preference?: GenerationPreference) {
+  const existing = await store.get<Job>("jobs", `IMG-${raw.idempotencyKey}`);
+  const source = raw.source ?? existing?.source ?? preference?.source ?? "queue";
+  const savedModel = existing?.source === "api" ? existing.model : preference?.model;
+  const input = { ...raw, source, model: raw.model || (source === "api" ? savedModel ?? "" : "") };
   if (input.resolution && (input.source !== "api" || input.provider !== "google"))
     throw new UserFacingError("Resolution levels require a supported Google image model");
   if (input.source === "api") {
     requireReleaseProvider(input.provider);
-    const models = applyVerifiedModelProfiles((await api.store.get<Model[]>("models", input.provider)) ?? []);
+    if (existing?.source === input.source && existing.provider === input.provider && existing.model === input.model) {
+      const target = resolveQueueSize(input);
+      const size = input.width === undefined && input.aspectRatio === existing.aspectRatio
+        ? existing.requestedSize ?? { width: existing.width, height: existing.height }
+        : target;
+      return requestSchema.parse({
+        ...input,
+        ...size,
+        exactDimensions: input.width === undefined && existing.exactDimensions === false ? false : undefined,
+      });
+    }
+    const models = applyVerifiedModelProfiles((await store.get<Model[]>("models", input.provider)) ?? []);
     const profile = sizeProfileSchema.safeParse(models?.find(model => model.id === input.model)?.sizeProfile);
     if (!profile.success) throw new UserFacingError("This model has no valid size profile. Choose another model or refresh its configuration.");
     return requestSchema.parse({
@@ -38,21 +58,37 @@ async function normalizeRequest(input: z.infer<typeof mcpRequestSchema>, api: Aw
   return requestSchema.parse({...input,...resolveQueueSize(input)});
 }
 
-const response = async (value: unknown) => {
+const response = async (value: unknown, store?: Storage, execution?: Awaited<ReturnType<typeof executionStatus>>) => {
   const isQueueJob = (item: unknown): item is Job => !!item && typeof item === "object" && "source" in item && item.source === "queue" && "status" in item;
   if (isQueueJob(value) || (Array.isArray(value) && value.some(isQueueJob))) {
-    const { executionStatus } = await import("./execution-status");
-    const execution = await executionStatus((await service()).store);
-    value = Array.isArray(value) ? value.map(item => isQueueJob(item) ? { ...item, execution, recovery: jobRecovery(item) } : item) : { ...value as Job, execution, recovery: jobRecovery(value as Job) };
+    store ??= (await service()).store;
+    execution ??= await executionStatus(store);
   }
+  const withRecovery = async (item: unknown) => {
+    if (!item || typeof item !== "object" || !("status" in item)) return item;
+    const recovery = jobRecovery(item as Job);
+    if (isQueueJob(item)) {
+      const originalPath = recovery?.action === "inspect_size_mismatch"
+        ? (await store?.get<{ original?: string }>("generation-artifacts", item.id))?.original
+        : undefined;
+      return { ...item, execution, recovery: originalPath ? { ...recovery, originalPath } : recovery };
+    }
+    return recovery ? {...item, recovery} : item;
+  };
+  value = Array.isArray(value) ? await Promise.all(value.map(withRecovery)) : await withRecovery(value);
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 };
 export function createServer() {
   const server = new McpServer(
-    { name: "image-queue", version: "0.1.0" },
+    { name: "image-queue", version },
     { capabilities: { resources: { listChanged: true } } },
   );
   protectToolErrors(server);
+  server.registerTool("get_generation_source",{description:"Read the saved default source and API model for new image requests. Existing requests keep their source."},async()=>response({preference:await readGenerationPreference((await service()).store)??{source:"queue"},existingRequestsChanged:false}));
+  server.registerTool("set_generation_source",{
+    description:"Set the default source (queue or api) and optional configured OpenAI image model for NEW requests. This does not generate images, retry old requests, resume Codex or change existing jobs. API image requests are billed to the configured key. Use the user's chosen source; never switch it merely to bypass an error.",
+    inputSchema:generationPreferenceSchema.shape,
+  },async input=>response({preference:await saveGenerationPreference((await service()).store,input),existingRequestsChanged:false,generationStarted:false}));
   server.registerTool(
     "list_projects",
     { description: "List image projects" },
@@ -70,15 +106,16 @@ export function createServer() {
     "request_image",
     {
       description:
-        "Queue one image. For the agent queue provide aspectRatio (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16, 21:9) or exact width and height. API aspect-only requests require a verified size profile. For a Google model that lists resolution levels, pass resolution (512, 1K, 2K or 4K) from that list. Reuse idempotencyKey only for an identical request. Reference inputs must be real PNG, JPEG or WebP files (maximum 20 MB each): import them with add_reference, then pass returned referenceIds. SVG, GIF, PDF, Markdown, URLs and renamed non-image files are not accepted; convert to PNG before importing. A Codex queue job waits for the local runner; if paused, the user must resume it in the dashboard.",
+        "Queue one image. If source is omitted, use the saved default from get_generation_source; an explicit source overrides it for this request. API calls are billed separately. For the agent queue provide aspectRatio (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16, 21:9) or exact width and height. API aspect-only requests require a verified size profile. For a Google model that lists resolution levels, pass resolution (512, 1K, 2K or 4K) from that list. Reuse idempotencyKey only for an identical request. Reference inputs must be real PNG, JPEG or WebP files (maximum 20 MB each): import them with add_reference, then pass returned referenceIds. SVG, GIF, PDF, Markdown, URLs and renamed non-image files are not accepted; convert to PNG before importing. A Codex queue job waits for the local runner; if paused, the user must resume it in the dashboard.",
       inputSchema: mcpRequestSchema.shape,
     },
     async (input) => {
       const api = await service();
-      const job = await api.create(await normalizeRequest(input, api));
+      const preference = await readGenerationPreference(api.store);
+      const job = await api.create(await normalizeRequest(input, api.store, preference));
       // Keep execution in this call so a stdio exit cannot abandon API work.
-      await enqueue(job.id);
-      return response(await api.store.get<Job>("jobs", job.id));
+      if (job.status === "queued") await enqueue(job.id);
+      return response(await api.store.get<Job>("jobs", job.id), api.store);
     },
   );
   server.registerTool(
@@ -143,25 +180,26 @@ export function createServer() {
     "request_images",
     {
       description:
-        "Submit 1–20 image requests without opening an inline view. Each queue request accepts aspectRatio or exact width and height. All size inputs are validated before the first submission. References must be imported PNG, JPEG or WebP images (up to 20 MB each), supplied by referenceIds; no SVG, PDF, Markdown or URLs.",
+        "Submit 1–20 image requests without opening an inline view. Omitting source uses the saved default; an explicit source overrides it per request. API calls are billed separately. Each queue request accepts aspectRatio or exact width and height. All size inputs are validated before the first submission. References must be imported PNG, JPEG or WebP images (up to 20 MB each), supplied by referenceIds; no SVG, PDF, Markdown or URLs.",
       inputSchema: { requests: z.array(mcpRequestSchema).min(1).max(20) },
     },
     async ({ requests }) => {
       const api = await service();
       const jobs: Job[] = [];
-      const normalized = await Promise.all(requests.map(input => normalizeRequest(input, api)));
+      const preference = await readGenerationPreference(api.store);
+      const normalized = await Promise.all(requests.map(input => normalizeRequest(input, api.store, preference)));
       for (const input of normalized) {
         const job = await api.create(input);
-        await enqueue(job.id);
+        if (job.status === "queued") await enqueue(job.id);
         jobs.push((await api.store.get<Job>("jobs", job.id))!);
       }
-      return response(jobs);
+      return response(jobs, api.store);
     },
   );
   server.registerTool(
     "wait_for_job",
     {
-      description: "Wait up to 60 seconds for a terminal state. Always inspect status, error, recovery and execution.nextAction: paused/blocked execution requires user action, not repeated submission.",
+      description: "Wait up to 60 seconds for a terminal state. An unclaimed Codex job returns early if the queue needs user action. Inspect status, error, recovery and execution.nextAction before deciding what to do.",
       inputSchema: {
         id: idSchema,
         timeoutSeconds: z.number().min(0).max(60).default(30),
@@ -169,19 +207,26 @@ export function createServer() {
     },
     async ({ id, timeoutSeconds }, { mcpReq: { signal } }) => {
       const deadline = Date.now() + timeoutSeconds * 1000;
+      const api = await service();
       let job: Job | undefined;
       do {
         signal.throwIfAborted();
-        job = (await refreshedJobs()).find((j) => j.id === id);
+        job = (await refreshedJobs(api)).find((j) => j.id === id);
         if (
           !job ||
           !["queued", "running"].includes(job.status) ||
           Date.now() >= deadline
         )
           break;
-        await delay(Math.min(1000, deadline - Date.now()), undefined, { signal });
+        if (job.source === "queue" && job.status === "queued" && !job.claim) {
+          const execution = await executionStatus(api.store);
+          if (execution.requiresUserAction) return response(job, api.store, execution);
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await delay(Math.min(1000, remaining), undefined, { signal });
       } while (Date.now() <= deadline);
-      return response(job ?? { error: "Not found" });
+      return response(job ?? { error: "Not found" }, api.store);
     },
   );
   server.registerTool(

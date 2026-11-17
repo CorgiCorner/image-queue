@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Choose the default generation source and OpenAI model in the dashboard or through MCP. Repeating the same MCP request keeps its original source and size.
+- Report when the Codex queue needs attention. MCP can return pending jobs immediately when the queue needs user action, and returns the original image path after a size mismatch when available.
+- Clarify recovery for uncertain jobs. Mark as failed updates the existing job, and Retry stays a separate action.
+- Add an OpenAI connection check in Settings, improve reference and size handling, and refine the image detail, tag suggestions and gallery notices.
+
 ## 0.1.2 — 2026-11-16
 
 - Keep the local queue running when several images generate at once. Workers, page loads and agents now wait briefly for a busy storage lock instead of stopping the queue and marking the image as uncertain.

@@ -5,6 +5,7 @@ import { tagImageAction, removeImageTagAction } from "@/actions";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Tooltip } from "./ui/tooltip";
 import { Plus, X } from "@phosphor-icons/react";
 
 type Result = { data?: Job; serverError?: string; validationErrors?: unknown };
@@ -51,12 +52,12 @@ export function ImageTags({ job, onUpdated }: { job: Job; onUpdated: (job: Job) 
   return <div className="image-tags" ref={root} aria-busy={pending}>
     <Label htmlFor={`image-tags-${job.id}`}>Tags</Label>
     <div className="tag-chips" role="group" aria-label="Accepted tags">
-      {accepted.map(tag => <Button key={tag.tag} variant="outline" size="sm"
+      {accepted.map(tag => <Tooltip key={tag.tag} label={tag.tag}><Button variant="outline" size="sm"
         className={`tag-chip tag-chip-accepted${added.includes(tag.tag) ? " tag-chip-added" : ""}`}
-        aria-label={`Remove tag ${tag.tag}`} title={tag.tag}
+        aria-label={`Remove tag ${tag.tag}`}
         aria-disabled={pending} onClick={() => void mutate([tag.tag], true, "")}>
         <span>{shortTag(tag.tag)}</span><X aria-hidden="true" />
-      </Button>)}
+      </Button></Tooltip>)}
       <Input autoFocus ref={input} id={`image-tags-${job.id}`} className="tag-input" placeholder="Add a tag"
         value={draft} aria-disabled={pending}
         onChange={event => setDraft(event.target.value)}
@@ -79,12 +80,12 @@ export function ImageTags({ job, onUpdated }: { job: Job; onUpdated: (job: Job) 
           onClick={() => void mutate(suggested.map(tag => tag.tag), false, "")}>Add all</Button>
       </div>
       <div className="tag-chips">
-        {visible.map((tag, index) => <Button key={tag.tag} variant="outline" size="sm"
-          className="tag-chip tag-chip-suggested" data-suggestion={tag.tag} title={tag.tag}
+        {visible.map((tag, index) => <Tooltip key={tag.tag} label={tag.tag}><Button variant="outline" size="sm"
+          className="tag-chip tag-chip-suggested" data-suggestion={tag.tag}
           aria-label={`Add tag ${tag.tag}`} aria-disabled={pending}
           onClick={() => void mutate([tag.tag], false, suggested[index + 1]?.tag ?? "")}>
           <Plus aria-hidden="true" /><span>{shortTag(tag.tag)}</span>
-        </Button>)}
+        </Button></Tooltip>)}
         {!expanded && suggested.length > 8 && <Button variant="ghost" size="sm" className="tag-show-more"
           onClick={() => setExpanded(true)}>Show {suggested.length - 8} more</Button>}
       </div>
