@@ -37,6 +37,9 @@ export async function loadWorkspaceState() {
   const localRunner=(globalThis as typeof globalThis & {imageQueueLocalRunner?: {status():{mode:string;running:number;enabled:number;desiredWorkers?:number;paused?:boolean;blockedReason?:string;blockedJobId?:string;canResume?:boolean;resumeAt?:string}}}).imageQueueLocalRunner?.status();
   return {
     localRunner,
+    providerCheckedAt: (await store.get<{checkedAt?:string}>("connection-checks","openai"))?.checkedAt,
+    codexConnection: await store.get<{login:string;checkedAt:string}>("connection-checks","codex"),
+    processing: cloud ? undefined : await (await import("./processing")).processingStatus(store),
     generationSource: await (await import("./generation-preference")).readGenerationPreference(store),
     platformSupport: cloud ? undefined : platformSupport(process.platform, process.arch),
     mcpLaunch: cloud || !paths ? undefined : localMcpLaunch(paths, await (await import("../storage/node-executable")).nodeExecutable()),

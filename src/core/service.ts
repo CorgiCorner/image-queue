@@ -1,3 +1,5 @@
+import {waitForLock} from "../storage/wait-for-lock";
+import { configuration } from "./config";
 import { UserFacingError } from "./user-facing-error";
 import { resolveModelSize, resolveQueueSize } from "./size-intent";
 import { createRecordIdentity } from "./replica-identity";
@@ -74,14 +76,19 @@ export class ImageService {
     const { idempotencyKey, ...body } = parsed;
     const requestHash = await hash(JSON.stringify(body));
     const id = `IMG-${idempotencyKey}`;
-    return this.store.lock(id, async () => {
+    const existingRequest = async () => {
       const existing = await this.store.get<Job>("jobs", id);
-      if (existing) {
-        if (existing.requestHash !== requestHash)
-          throw new UserFacingError(
-            "Idempotency key already belongs to a different request");
-        return existing;
-      }
+      if (existing && existing.requestHash !== requestHash)
+        throw new UserFacingError("Idempotency key already belongs to a different request");
+      return existing;
+    };
+    // An active provider call holds this record for its entire execution. A replay
+    // can return its committed job immediately without waiting for generation.
+    const committed=await existingRequest();
+    if(committed)return committed;
+    return waitForLock(this.store,id, async () => {
+      const existing=await existingRequest();
+      if(existing)return existing;
       if (await this.store.get("tombstones", id)) {
         throw new UserFacingError("This request was permanently deleted. Use a new idempotency key for a new request.");
       }
@@ -121,9 +128,13 @@ export class ImageService {
         updatedAt: now,
         status: "queued",
       };
+      // The job lock serializes this intent with the executor. A crash after the job
+      // commit cannot strand it, even if the submitting MCP process exits immediately.
+      if (job.source === "api" && configuration("STORAGE_DRIVER") !== "cloudflare")
+        await this.store.put("api-pending", id, { id, createdAt: now });
       await this.store.put("jobs", id, job);
       return job;
-    });
+    },10000);
   }
   async retryImage(id: string, acknowledgeUncertain = false) {
     idSchema.parse(id);

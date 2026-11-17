@@ -13,6 +13,11 @@ id="${1:?usage: request.sh <ID> <file-name.png> < body}"
 name="${2:?usage: request.sh <ID> <file-name.png> < body}"
 [[ "$id" =~ ^IMG-[A-Za-z0-9-]+$ ]] || { echo "ID must match IMG-[A-Za-z0-9-]+" >&2; exit 1; }
 [[ "$name" =~ ^[A-Za-z0-9._-]+\.png$ ]] || { echo "file name must be a plain .png name" >&2; exit 1; }
+# Installed together, both helpers use the crash-recoverable lock. Keep
+# standalone copies interoperable with older installations of the protocol.
+if [[ -f "$DIR/worker.py" ]] && grep -q 'commands.add_parser("append")' "$DIR/worker.py"; then
+  exec python3 "$DIR/worker.py" --root "$DIR" append "$id" "$name"
+fi
 body="$(cat)"
 [[ "$body" == *"Prompt:"* ]] || { echo "body must contain a '- Prompt:' field" >&2; exit 1; }
 save="$DIR/out/$id/$name"

@@ -39,7 +39,7 @@ export function WorkerAlert({ enabled, unavailable, message, manageHref, instant
   return <div className="worker-alert-region" data-open={unavailable || undefined} data-instant-height={instantHeight || undefined}><div className="worker-alert-clip">
     <div ref={root} className="composer-alert" role="note" aria-hidden={!unavailable} inert={!unavailable}>
     <Clock size={16} /><ChangingLabel value={unavailable ? message : retainedMessage} />
-    <Link className={buttonVariants({variant:"secondary",size:"sm"})} href={manageHref} prefetch>Manage workers</Link>
+    <Link className={buttonVariants({variant:"secondary",size:"sm"})} href={manageHref} prefetch>{manageHref.endsWith("#queue-processing") ? "Manage processing" : "Manage workers"}</Link>
     </div>
   </div></div>;
 }

@@ -1,8 +1,10 @@
-import {execFile} from 'node:child_process';
+import {createInterface} from 'node:readline';
+import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import {readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import type {Storage} from './types';
+import {RejectedQueueRequest} from '../core/local-worker-pool';
 import {LocalJobSource,type LocalSourceHooks} from '../core/local-job-source';
 import type {LocalGenerationJob} from './local-generation';
 import type {RunnerResult} from '../core/job-source';
@@ -16,40 +18,59 @@ export type QueueExecutionJob=LocalGenerationJob&{capability:'codex-image'};
 /** Only this execution adapter claims/publishes; the UI queue adapter stays an observer. */
 export function queueWorkerSource(store:Storage,options:{queueRoot:string;workerId:string;model:LocalGenerationJob['model'];effort:LocalGenerationJob['effort'];python?:string}) {
  const claims=new Map<string,Claim>();
- async function legacyReservationBlocks(candidates:{id:string;reservation?:{worker:string;state:string}}[]) {
-  for(const candidate of candidates) {
-   if(candidate.reservation?.state!=='reserved'||candidate.reservation.worker.startsWith('local:'))continue;
-   const job=await store.get<Job>('jobs',candidate.id);
-   if(!job?.reservationReviewedAt || !Number.isFinite(Date.parse(job.reservationReviewedAt)) || job.claim?.owner!==candidate.reservation.worker || !['uncertain','failed'].includes(job.status))return true;
-  }
-  return false;
- }
-
+ const bundled = path.resolve('docs/protocol/worker.py');
+ const installed = path.join(options.queueRoot,'worker.py');
+ let command:Promise<string>|undefined;
  async function helper(args:string[]) {
-  const result=await exec(options.python??'python3',[path.join(options.queueRoot,'worker.py'),'--root',options.queueRoot,...args],{maxBuffer:1024*1024});
+  // Use the compatible, upgraded helper for a stock v0.1.3 installation. Preserve custom helpers.
+  command ??= readFile(installed).then(async bytes=>
+    (await hash(bytes))==='f2b353d0fe9414b40425822af4410ce67df8e0544e2baecb703fb6034826c822' ? bundled : installed);
+  const result=await exec(options.python??'python3',[await command,'--root',options.queueRoot,...args],{maxBuffer:1024*1024});
   return JSON.parse(result.stdout);
  }
- async function hasPending() {
-  const candidates=await helper(['list']) as {id:string;status:string;reservation?:{worker:string;state:string}}[];
-  if(await legacyReservationBlocks(candidates))return false;
-  const attempts=await store.list<{jobId:string;startedAt?:string;state:string}>('local-attempts');
-  return candidates.some(c=>c.status==='pending'&&!c.reservation || c.reservation?.worker.startsWith('local:')&&!attempts.some(a=>a.jobId===c.id&&(a.startedAt||a.state==='uncertain')));
+ async function candidate(excluded:ReadonlySet<string>) {
+  const child=spawn(options.python??'python3',[bundled,'--root',options.queueRoot,'candidates'],{stdio:['ignore','pipe','ignore']});
+  const lines=createInterface({input:child.stdout});
+  const finished=new Promise<void>((resolve,reject)=>{
+   child.once('error',reject);
+   child.once('close',code=>code===0?resolve():reject(new Error('Could not inspect the queue protocol')));
+  });
+  let pending=false;
+  let blocked=false;
+  let owner:string|undefined;
+  await Promise.all([finished,(async()=>{
+   for await(const line of lines){
+    const row=JSON.parse(line) as {id:string;worker?:string};
+    if(!row.worker){if(!excluded.has(row.id))pending=true;continue;}
+    if(!row.worker.startsWith('local:')){
+     const job=await store.get<Job>('jobs',row.id);
+     if(!job?.reservationReviewedAt || !Number.isFinite(Date.parse(job.reservationReviewedAt)) || job.claim?.owner!==row.worker || !['uncertain','failed'].includes(job.status))blocked=true;
+    } else if(!owner&&!excluded.has(row.id)&&!claims.has(row.id)){
+     const pointer=await store.get<string>('attempt-by-job',row.id);
+     const attempt=pointer && await store.get<{startedAt?:string;state:string}>('local-attempts',pointer);
+     if(!attempt || (!attempt.startedAt && attempt.state!=='uncertain'))owner=row.worker;
+    }
+   }
+  })()]);
+  return blocked ? undefined : owner ? {owner} : pending ? {owner:undefined} : undefined;
  }
+ async function hasPending(){return !!await candidate(new Set());}
  const hooks:LocalSourceHooks<QueueExecutionJob>={
   async next(_capabilities,excluded,runnerId){
-   const candidates=await helper(['list']) as {id:string;status:string;reservation?:{worker:string;state:string}}[];
-   // Drain legacy workers before the new executor takes any work.
-   if(await legacyReservationBlocks(candidates))return null;
-   const attempts=await store.list<{jobId:string;state:string;startedAt?:string}>('local-attempts');
-   const resumable=candidates.find(c=>c.reservation?.worker.startsWith('local:')&&!excluded.has(c.id)&&!attempts.some(a=>a.jobId===c.id&&(a.startedAt||a.state==='uncertain')));
-   const claimOwner=resumable?.reservation?.worker??runnerId;
-   // Avoid acquiring an already ambiguous request or a legacy live reservation.
-   if(!resumable&&!candidates.some(c=>c.status==='pending'&&!c.reservation&&!excluded.has(c.id)))return null;
+   const selection=await candidate(excluded);
+   if(!selection)return null;
+   const claimOwner=selection.owner??runnerId;
    const claim=await helper(['claim','--worker',claimOwner]) as Claim&{job?:null};
    if(claim.job===null)return null;
-   if((claim.already_owned&&!resumable)||excluded.has(claim.id))throw new Error('Existing reservation requires recovery; automatic generation refused');
+   if((claim.already_owned&&!selection.owner)||excluded.has(claim.id))throw new Error('Existing reservation requires recovery; automatic generation refused');
+   if(!claim.generation.ready){
+    const message=claim.generation.error??'Invalid request';
+    await helper(['finish','--worker',claim.worker,'--id',claim.id,'--token',claim.token,'--status','blocked','--reason',message]);
+    const job=await store.get<Job>('jobs',claim.id);
+    if(job)await store.put('jobs',claim.id,{...job,status:'blocked',error:message,updatedAt:new Date().toISOString()});
+    throw new RejectedQueueRequest(claim.id,message);
+   }
    claims.set(claim.id,claim);
-   if(!claim.generation.ready){await helper(['finish','--worker',claim.worker,'--id',claim.id,'--token',claim.token,'--status','blocked','--reason',claim.generation.error??'Invalid request']);return null;}
    const config=await poolConfig(store);
    return {id:claim.id,capability:'codex-image',prompt:claim.generation.toolArguments.prompt,references:claim.generation.referencePaths,width:claim.generation.width,height:claim.generation.height,transparent:claim.generation.toolArguments.transparent_background,model:config.workerModel??options.model,effort:config.workerEffort??options.effort};
   },
@@ -72,8 +93,19 @@ export function queueWorkerSource(store:Storage,options:{queueRoot:string;worker
    claims.delete(id);
   },
   async fail(id,error){
+   claims.delete(id);
    // Retain the protocol reservation: uncertainty never makes it available twice.
    const job=await store.get<Job>('jobs',id);
+   if(job?.status==='done')return;
+   if(job?.outputPath){
+    const observed=await (await queueInspector(options.queueRoot))(job);
+    // The helper validates delivery and receipt before committing done. A crash
+    // between that commit and our metadata write must preserve the delivered image.
+    if(observed.status==='done' && observed.generatedSize){
+     await store.put('jobs',id,{...job,...observed,claim:undefined,error:undefined,updatedAt:new Date().toISOString()});
+     return;
+    }
+   }
    if(job)await store.put('jobs',id,{...job,status:error.uncertain?'uncertain':'failed',error:error.message,updatedAt:new Date().toISOString()});
   },
  };

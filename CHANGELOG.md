@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4 — 2026-11-17
+
+- Manage Codex and OpenAI API processing in Settings or through MCP. Pause either source or both, set parallel requests, and see executor activity, waiting requests and the last delivery.
+- Keep processing independent requests after individual failures. Set an optional limit on distinct failed requests within a rolling time window. Authentication and quota failures stop the affected source.
+- Accept local API requests durably even when the submitting agent disconnects. After a restart, recover saved images and flag uncertain submissions for inspection.
+- Handle large Codex queues and report pending requests to MCP before the gallery imports them. Recover queue locks left by interrupted current-version workers.
+
 ## 0.1.3
 
 - Choose the default generation source and OpenAI model in the dashboard or through MCP. Repeating the same MCP request keeps its original source and size.

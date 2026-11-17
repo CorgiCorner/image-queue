@@ -14,7 +14,7 @@ import { thumbnail } from "../sources/thumbnail";
 import { jobViewHtml } from "./views/job-html";
 import { z } from "zod";
 import { idSchema } from "../core/schema";
-import { refreshedJobs, service, enqueue } from "../core/runtime";
+import { refreshedJob, refreshedJobs, service, enqueue } from "../core/runtime";
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/server";
 import {
   getUiCapability,
@@ -72,7 +72,7 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
         _meta: { ui: { visibility: ["app"] } },
       },
       async ({ id }) => {
-        const job = (await refreshedJobs()).find((candidate) => candidate.id === id);
+        const job = await refreshedJob(id);
         let workersOffline = false;
         let queueNotice: string | undefined;
         let workerSlot: number | undefined;
@@ -88,13 +88,18 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
               // Local workers send no heartbeats; report the runner's own paused or stopped state instead.
               const { executionStatus } = await import("./execution-status");
               const execution = await executionStatus(store);
-              if ("paused" in execution) queueNotice = queueWaitNotice({ paused: execution.paused, blockedReason: execution.blockedReason, resumesAutomatically: Boolean(execution.resumeAt) });
+              if ("paused" in execution) queueNotice = queueWaitNotice({ paused: !!execution.paused, blockedReason: execution.blockedReason, resumesAutomatically: Boolean(execution.resumeAt) });
             }
           } else {
             const matches = pulses.filter(pulse => pulse.workerId === job.claim?.owner &&
               Number.isInteger(pulse.slot) && pulse.slot >= 1 && pulse.slot <= MAX_WORKERS);
             if (matches.length === 1) workerSlot = matches[0].slot;
           }
+        }
+        if(job?.source==="api" && job.status==="queued"){
+          const {executionStatus}=await import("./execution-status");
+          const execution=await executionStatus(await storage(),"api");
+          if(execution.requiresUserAction)queueNotice=execution.nextAction;
         }
         return {
           content: [{ type: "text" as const, text: JSON.stringify(job ? { ...job, workersOffline, ...(queueNotice ? { queueNotice } : {}), workerSlot } : { error: "Not found" }) }],

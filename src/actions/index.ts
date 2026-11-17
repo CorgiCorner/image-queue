@@ -9,6 +9,7 @@ import { noteInput } from "@/core/notes";
 import { pathsSchema, savePaths } from "@/core/paths";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
+import { changeProcessing, processingInput } from "@/core/processing";
 import { after } from "next/server";
 import { createSafeActionClient } from "next-safe-action";
 import { z } from "zod";
@@ -34,7 +35,7 @@ const action = createSafeActionClient({
   return next();
 });
 async function submit(job: Job, api: Awaited<ReturnType<typeof service>>) {
-  if (job.source === "queue") return enqueue(job.id);
+  if (job.source === "queue" || (await import("@/core/config")).configuration("STORAGE_DRIVER") !== "cloudflare") return enqueue(job.id);
   after(async () => {
     try {
       await enqueue(job.id);
@@ -175,8 +176,11 @@ export const connectAction = action
       ...model,
       sizeProfile: model.sizeProfile ?? storedProfiles.get(model.id),
     })));
-    await saveKey(api.store, parsedInput.provider, parsedInput.apiKey);
-    await api.store.put("models", parsedInput.provider, models);
+    await api.store.lock("provider-connection",async()=>{
+      await saveKey(api.store, parsedInput.provider, parsedInput.apiKey);
+      await api.store.put("models", parsedInput.provider, models);
+      await api.store.put("connection-checks",parsedInput.provider,{checkedAt:new Date().toISOString()});
+    });
     revalidatePath("/");
     return models;
   });
@@ -186,10 +190,13 @@ export const testConnectionAction = action
   .action(async ({ parsedInput }) => {
     requireReleaseProvider(parsedInput.provider);
     const api = await service();
+    return api.store.lock("provider-connection",async()=>{
     const discovered = await discoverModels(parsedInput.provider, await readKey(api.store, parsedInput.provider));
     if (!discovered.length)
       throw new UserFacingError("The provider answered, but no supported image models are available for this key.");
+    await api.store.put("connection-checks",parsedInput.provider,{checkedAt:new Date().toISOString()});
     return { models: discovered.length };
+    });
   });
 export const moveJobAction = action
   .inputSchema(z.object({ id: idSchema, projectId: idSchema }))
@@ -212,24 +219,28 @@ export const recheckLocalRunnerAction = action
     await runner?.wake(true);
     revalidatePath("/");
   });
+async function updateProcessing(input: Parameters<typeof changeProcessing>[1]) {
+  const store = (await service()).store;
+  await changeProcessing(store, input);
+  const runners = globalThis as typeof globalThis & {
+    imageQueueLocalRunner?: {wake(resume?:boolean):Promise<void>};
+    imageQueueApiRunner?: {wake():void};
+  };
+  if(input.source !== "api") await runners.imageQueueLocalRunner?.wake();
+  if(input.source !== "queue") runners.imageQueueApiRunner?.wake();
+  revalidatePath("/");
+}
+export const processingAction = action.inputSchema(processingInput).action(async ({parsedInput}) => updateProcessing(parsedInput));
 export const pauseLocalRunnerAction = action
   .inputSchema(z.object({paused:z.boolean()}))
-  .action(async ({parsedInput})=>{
-    const store=(await service()).store;
-    const {readLocalRunnerSettings}=await import('@/core/local-runner-settings');
-    const config=await readLocalRunnerSettings(store);
-    await store.put('settings','local-runner',{...config,workers:config?.workers??1,paused:parsedInput.paused});
-    const runner=(globalThis as typeof globalThis & {imageQueueLocalRunner?:{wake(resume?:boolean):Promise<void>}}).imageQueueLocalRunner;
-    await runner?.wake(!parsedInput.paused);
-    revalidatePath('/');
-  });
+  .action(async ({parsedInput})=>updateProcessing({source:"queue",paused:parsedInput.paused}));
 export const poolConfigAction = action
-  .inputSchema(poolSchema)
+  .inputSchema(poolSchema.and(z.object({preserveLocalLimit:z.boolean().optional()})))
   .action(async ({ parsedInput }) => {
     const store=(await service()).store;
     const runner=(globalThis as typeof globalThis & {imageQueueLocalRunner?: {wake(resume?:boolean):Promise<void>}}).imageQueueLocalRunner;
     const config = await savePoolConfig(store, runner ? {...parsedInput,workers:0} : parsedInput);
-    if(runner){const {readLocalRunnerSettings}=await import('@/core/local-runner-settings');const current=await readLocalRunnerSettings(store);await store.put('settings','local-runner',{...current,workers:Math.max(1,parsedInput.workers),paused:current?.paused??true});await runner.wake();}
+    if(runner && !parsedInput.preserveLocalLimit){await changeProcessing(store,{source:"queue",workers:Math.max(1,parsedInput.workers)});await runner.wake();}
     revalidatePath("/");
     return config;
   });
@@ -241,7 +252,8 @@ export const disconnectAction = action
     }),
   )
   .action(async ({ parsedInput }) => {
-    await removeKey((await service()).store, parsedInput.provider);
+    const store=(await service()).store;
+    await store.lock("provider-connection",async()=>{await removeKey(store, parsedInput.provider);await store.put("connection-checks",parsedInput.provider,{});});
     revalidatePath("/");
   });
 

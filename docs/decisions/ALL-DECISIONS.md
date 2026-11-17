@@ -18,6 +18,7 @@
 | [0016](0016-local-process-workers-for-codex.md) | accepted | Run Codex generation through application-owned local workers |
 | [0017](0017-forward-worker-requests-verbatim.md) | accepted | Forward image-worker requests verbatim with explicit reference attachments |
 | [0018](0018-kernel-locks-for-local-storage.md) | accepted | Use kernel locks for local storage operations |
+| [0019](0019-coordinate-local-queue-processing.md) | accepted | Coordinate local queue processing per generation source |
 
 0010–0012 remain reserved for idempotency, durable execution and model profiles. Proposed records remain proposals.
 

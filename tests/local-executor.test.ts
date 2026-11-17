@@ -31,9 +31,10 @@ it('honors pause while the usage preflight is still pending',async()=>{
 it('preserves safe generation failure details in the job and identifies the stopped job',async()=>{
  const {UserFacingError}=await import('../src/core/user-facing-error');
  const source={claim:vi.fn().mockResolvedValueOnce({job:{id:'one'},leaseId:'lease',expiresAt:''}).mockResolvedValue(null),heartbeat:vi.fn(),complete:vi.fn(),fail:vi.fn()};
- const blocked=vi.fn();
- const pool=createLocalExecutor({source,runnerId:'local',capabilities:['codex-image'],generation:{prepare:vi.fn(),generate:async()=>{throw new UserFacingError('Codex is not signed in.')}},report:vi.fn(),blocked});
+ const failed=vi.fn(async (message:string)=>message);
+ const pool=createLocalExecutor({source,runnerId:'local',capabilities:['codex-image'],generation:{prepare:vi.fn(),generate:async()=>{throw new UserFacingError('Codex is not signed in.')}},report:vi.fn(),failed});
  pool.configure(1);await flush();
  expect(source.fail).toHaveBeenCalledWith('one','lease',expect.objectContaining({message:'Codex is not signed in.',uncertain:true}));
- expect(blocked).toHaveBeenCalledWith('Codex is not signed in.','generation','one');pool.stop();
+ expect(failed).toHaveBeenCalledWith('Codex is not signed in.','one');
+ expect(pool.blockedReason).toBe('Codex is not signed in.');pool.stop();
 });

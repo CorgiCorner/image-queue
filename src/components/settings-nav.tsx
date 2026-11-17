@@ -5,11 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 type Section = { id: string; label: string };
 type Group = { label: string; sections: Section[] };
 
-function settingsGroups(cloud: boolean, localRunner: boolean): Group[] {
+function settingsGroups(cloud: boolean, localRunner: boolean, processing: boolean): Group[] {
   return [
     { label: "Generation", sections: [
       { id: "generation-source", label: "Default source" },
       { id: "provider-connection", label: "Providers" },
+      ...(processing ? [{ id: "queue-processing", label: "Processing" }] : []),
       { id: "worker-pool", label: localRunner ? "Codex queue" : "Worker pool" },
     ] },
     ...(cloud ? [] : [{ label: "Storage", sections: [
@@ -22,8 +23,8 @@ function settingsGroups(cloud: boolean, localRunner: boolean): Group[] {
 }
 
 /** Grouped section list: a sticky rail on wide screens, a scrollable row below that. */
-export function SettingsNav({ cloud, localRunner = false }: { cloud: boolean; localRunner?: boolean }) {
-  const groups = useMemo(() => settingsGroups(cloud, localRunner), [cloud, localRunner]);
+export function SettingsNav({ cloud, localRunner = false, processing = false }: { cloud: boolean; localRunner?: boolean; processing?: boolean }) {
+  const groups = useMemo(() => settingsGroups(cloud, localRunner, processing), [cloud, localRunner, processing]);
   const ids = useMemo(() => groups.flatMap(group => group.sections.map(section => section.id)), [groups]);
   const [active, setActive] = useState(ids[0]);
   const list = useRef<HTMLDivElement>(null);

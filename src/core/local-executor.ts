@@ -11,6 +11,9 @@ export interface ExecutorGeneration<T extends ExecutorJob> {
 }
 /** Binds scheduling to the same source contract used by a future remote runner. */
 export function createLocalExecutor<T extends ExecutorJob>(options:{
+ admit?(claim:()=>Promise<ClaimedJob<T>|null>):Promise<ClaimedJob<T>|null>;
+ failed?(message:string,id:string):Promise<string|undefined>;
+ delivered?():Promise<void>;
  source:JobSource<T>;generation:ExecutorGeneration<T>;runnerId:string;
  capabilities:RunnerCapability[];heartbeatMs?:number;hasPending?():Promise<boolean>;beforeClaim?():Promise<void>;report(error:unknown):void;blocked?(message:string,phase:'admission'|'generation',jobId?:string):Promise<void>;
 }) {
@@ -20,7 +23,8 @@ export function createLocalExecutor<T extends ExecutorJob>(options:{
    if(options.hasPending && !(await options.hasPending()))return undefined;
    await options.beforeClaim?.();
    if(!allowed())return undefined;
-   const claim=await options.source.claim(`${options.runnerId}:${crypto.randomUUID()}`,options.capabilities);
+   const acquire=()=>options.source.claim(`${options.runnerId}:${crypto.randomUUID()}`,options.capabilities);
+   const claim=options.admit?await options.admit(acquire):await acquire();
    return claim?{id:claim.job.id,claim}:undefined;
   },
   begin:async work=>{await options.generation.prepare(work.claim.job);await options.source.start?.(work.id,work.claim.leaseId);},
@@ -45,11 +49,12 @@ export function createLocalExecutor<T extends ExecutorJob>(options:{
    if(!work.result)throw new Error('Generation result missing');
    await options.source.complete(work.id,work.claim.leaseId,work.result);
    await options.generation.published?.(work.id);
+   await options.delivered?.();
   },
   uncertain:async(work,error)=>{
    await options.generation.uncertain?.(work.id,error);
    await options.source.fail(work.id,work.claim.leaseId,{code:'execution_interrupted',message:error instanceof UserFacingError ? error.message : 'Generation did not complete locally. Verify the result before retrying.',uncertain:true});
   },
-  report:options.report,blocked:options.blocked,
+  report:options.report,blocked:options.blocked,failed:options.failed,
  });
 }

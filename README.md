@@ -30,10 +30,18 @@ Then:
 
 1. Open [http://127.0.0.1:3215](http://127.0.0.1:3215).
 2. Create a project.
-3. In **Settings**, add your OpenAI API key, or choose **Resume** in **Codex queue** for your signed-in Codex installation.
+3. In **Settings**, add your OpenAI API key, or choose **Resume** for **Codex queue** in **Processing** for your signed-in Codex installation.
 4. Write a prompt and generate.
 
 Prefer to let an agent do it? See [Set up with an agent](#set-up-with-an-agent).
+
+## Queue processing
+
+Open **Settings → Processing** to pause both local sources, control Codex and OpenAI API separately, or change their parallel limits. Running images finish when you pause. Resuming all preserves each source’s own pause. **Default source** applies to new requests. Explicit API requests use the configured OpenAI key and may incur charges.
+
+Each source continues with other requests after an individual failure. Under **Processing limits**, set a failure count and a window in minutes to stop after repeated failures, for example 5 different requests in 60 minutes. A count of 0 disables this threshold. Authentication and usage limits can stop the source immediately. Check the affected image before retrying an uncertain result.
+
+The local dashboard processes API jobs saved by the panel and by MCP, including after an app restart. Keep the dashboard running and the Mac awake. Agents can inspect both executors using `get_queue_processing` and adjust the same settings using `set_queue_processing`.
 
 ## Two ways to generate images
 

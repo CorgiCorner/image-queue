@@ -67,6 +67,7 @@ vi.mock("../src/actions", () => ({
   joinStackAction: vi.fn(async () => ({})),
   moveJobAction: vi.fn(async () => ({})),
   cancelAction: vi.fn(async () => ({})),
+  processingAction: vi.fn(async () => ({})),
   poolConfigAction: vi.fn(async () => ({})),
   pauseLocalRunnerAction: vi.fn(async () => ({})),
   retryBlockedQueueAction: vi.fn(async () => ({data:{queued:[],failures:[]}})),
@@ -108,6 +109,7 @@ import {
   createProjectAction,
   addNoteAction,
   createTopicAction,
+  processingAction,
   poolConfigAction,
   requestImageAction,
   moveJobAction,
@@ -593,10 +595,11 @@ it("downloads and reuses a generated image as a reference", async () => {
   );
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   await ready();
+  const composer = screen.getByRole("textbox", { name: "Image prompt" });
   fireEvent.click(screen.getByRole("button", { name: "Open IMG-first" }));
   fireEvent.click(screen.getByRole("button", { name: "Download" }));
   fireEvent.click(screen.getByRole("button", { name: "Use as reference" }));
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Image prompt" })));
+  await waitFor(() => expect(document.activeElement).toBe(composer), { timeout: 5000 });
   expect(screen.queryByText("References added")).toBeNull();
 });
 it("shows errors when reusing or moving a result fails", async () => {
@@ -2738,7 +2741,7 @@ it("updates the provider state from the saved catalog and shows success without 
   expect(success.classList.contains("provider-success")).toBe(true);
   expect(success.classList.contains("field-error")).toBe(false);
   expect(screen.getByRole("button", { name: "Update key & refresh models" })).toBeTruthy();
-  expect(screen.getByText("Connected", { exact: true })).toBeTruthy();
+  expect(screen.getByText("Model catalog saved", { exact: true })).toBeTruthy();
 });
 
 it("distinguishes a connected provider without a size profile from a missing connection", async () => {
@@ -3040,4 +3043,18 @@ it("restores the composer source when saving its default fails", async () => {
   fireEvent.change(screen.getByRole('combobox', {name:'Generation source'}), {target:{value:'api'}});
   await waitFor(() => expect(screen.getByText('Could not save source')).toBeDefined());
   expect((screen.getByRole('combobox', {name:'Generation source'}) as HTMLSelectElement).value).toBe('queue');
+});
+
+it("links the processing panel and saves a source pause independently of provider access", async () => {
+  const source = { paused: false, workers: 2, policy: { limit: 0, windowMinutes: 60 }, online: true, running: 0 };
+  const initialState = {
+    ...state, processing: { mode: "local", paused: false, queue: source, api: source },
+    localRunner: { mode: "local", paused: false, enabled: 2, running: 0 },
+  };
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => initialState })));
+  render(<Workspace settingsPage initialState={initialState as never} />);
+  expect(screen.getByRole("link", { name: "Processing" }).getAttribute("href")).toBe("#queue-processing");
+  fireEvent.click(screen.getByRole("button", { name: "Pause OpenAI API" }));
+  await waitFor(() => expect(processingAction).toHaveBeenCalledWith({ source: "api", paused: true }));
+  expect(screen.getByRole("button", { name: "Pause Codex queue" })).toBeTruthy();
 });

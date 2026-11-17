@@ -47,24 +47,20 @@ export class FileStorage implements Storage {
     return target;
   }
   async list<T>(collection: string): Promise<T[]> {
-    const directory = await this.location(`${collection}/index`);
-    const files = await readdir(path.dirname(directory));
-    const values = await Promise.all(
-      files
-        .filter((f) => f.endsWith(".json"))
-        .map((f) => this.get<T>(collection, f.slice(0, -5))),
-    );
-    return values.filter((v) => v !== undefined) as T[];
+    return (await this.entries<T>(collection)).map(entry => entry.value);
   }
   async entries<T>(collection: string): Promise<{ id: string; value: T }[]> {
-    const directory = await this.location(`${collection}/index`);
-    const files = await readdir(path.dirname(directory));
-    const entries = await Promise.all(files.filter(file => file.endsWith(".json")).map(async (file): Promise<{ id: string; value: T } | undefined> => {
-      const id = file.slice(0, -5);
-      const value = await this.get<T>(collection, id);
-      return value === undefined ? undefined : { id, value };
-    }));
-    return entries.filter((entry): entry is { id: string; value: T } => entry !== undefined);
+    const directory = path.dirname(await this.location(`${collection}/index`));
+    const files = (await readdir(directory)).filter(file => file.endsWith(".json"));
+    const entries: {id:string; value:T}[] = [];
+    for(let offset=0;offset<files.length;offset+=32) {
+      const batch=await Promise.all(files.slice(offset,offset+32).map(async file=>{
+        const id=file.slice(0,-5);
+        return {id,value:await this.get<T>(collection,id)};
+      }));
+      for(const {id,value} of batch)if(value!==undefined)entries.push({id,value});
+    }
+    return entries;
   }
   async get<T>(collection: string, id: string): Promise<T | undefined> {
     try {

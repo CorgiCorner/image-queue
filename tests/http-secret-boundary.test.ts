@@ -69,6 +69,7 @@ it("keeps a stored provider credential out of every HTTP surface and its logs", 
     expect(await initialized.text()).not.toContain(secret);
     await send({ method: "notifications/initialized" }, session!);
     const calls: Array<[string, Record<string, unknown>]> = [
+      ["get_queue_processing", {}], ["set_queue_processing", { source: "all", paused: true }],
       ["get_generation_source", {}], ["set_generation_source", { source: "queue" }],
       ["list_thumbnails", {}], ["get_image_details", { id: "missing" }],
       ["get_job_state", { id: "missing" }],

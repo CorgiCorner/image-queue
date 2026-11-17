@@ -30,11 +30,11 @@ it("propagates unexpected lock creation failures", async () => {
 it("propagates unexpected queue lock failures", async () => {
   const {withQueueLock}=await import("../src/sources/queue");
   const root=await mkdtemp(path.join(os.tmpdir(),"image-queue-lock-"));
-  const original=vi.mocked(mkdir).getMockImplementation()!;
+  const original=vi.mocked(open).getMockImplementation()!;
   try {
-    vi.mocked(mkdir).mockImplementation(async(...args:any[])=>{
-      if(String(args[0]).endsWith(".queue.lock")) throw new Error("lock io failure");
-      return original(...(args as Parameters<typeof mkdir>));
+    vi.mocked(open).mockImplementation(async(...args:any[])=>{
+      if(String(args[0]).endsWith(".queue.kernel")) throw new Error("lock io failure");
+      return original(...(args as Parameters<typeof open>));
     });
     await expect(withQueueLock(root,async()=>{})).rejects.toThrow("lock io failure");
   } finally {await rm(root,{recursive:true,force:true});}

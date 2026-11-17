@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MemoryStorage } from "../src/storage/memory";
 const state = vi.hoisted(() => ({
   store: undefined as unknown as MemoryStorage,
@@ -22,6 +22,7 @@ vi.mock("../src/core/runtime", async () => {
   };
 });
 import * as actions from "../src/actions";
+afterEach(() => vi.unstubAllEnvs());
 beforeEach(async () => {
   state.store = new MemoryStorage();
   vi.clearAllMocks();
@@ -235,7 +236,8 @@ it("permanently deletes trashed images through the validated action", async () =
   expect(revalidatePath).toHaveBeenCalledWith("/");
 });
 
-it("schedules an API iteration after returning the new version", async () => {
+it.each(["disk", "cloudflare"])("dispatches an API iteration using the %s lifecycle", async driver => {
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER", driver);
   const parent = await state.store.get<Record<string, unknown>>("jobs", "one");
   await state.store.put("jobs", "one", { ...parent, source: "api", provider: "openai", model: "gpt-image-1" });
   await state.store.put("references", "ref", { id: "ref", projectId: "project", kind: "image" });
@@ -244,6 +246,12 @@ it("schedules an API iteration after returning the new version", async () => {
   });
   expect(result?.serverError).toBeUndefined();
   expect(result?.data).toMatchObject({ id: "IMG-api-iteration", source: "api", parentVersionId: "one" });
+  if (driver === "disk") {
+    expect(await state.store.get("api-pending", "IMG-api-iteration")).toMatchObject({ id: "IMG-api-iteration" });
+    expect(state.enqueue).toHaveBeenCalledWith("IMG-api-iteration");
+    expect(state.after).not.toHaveBeenCalled();
+    return;
+  }
   expect(state.enqueue).not.toHaveBeenCalled();
   expect(state.after).toHaveBeenCalledOnce();
   await state.after.mock.calls[0][0]();

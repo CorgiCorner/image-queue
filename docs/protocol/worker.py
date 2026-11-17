@@ -24,20 +24,59 @@ def utcnow():
 
 @contextmanager
 def queue_lock(root, timeout):
-    lock = root / ".queue.lock"
-    deadline = time.monotonic() + timeout
-    while True:
+    # On a platform without POSIX file locks, retain the original exclusion protocol.
+    if os.name != "posix":
+        marker = root / ".queue.lock"
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                marker.mkdir()
+                break
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("queue lock is busy")
+                time.sleep(0.05)
         try:
-            lock.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise ValueError("queue lock is busy; never remove another process's lock")
-            time.sleep(0.05)
+            yield
+        finally:
+            marker.rmdir()
+        return
+    import fcntl
+    marker = root / ".queue.lock"
+    kernel = root / ".queue.kernel"
+    deadline = time.monotonic() + timeout
+    fd = os.open(kernel, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        yield
+        # Match fs-native-extensions: flock on macOS, byte-range lock on Linux.
+        acquire = fcntl.flock if sys.platform == "darwin" else fcntl.lockf
+        while True:
+            try:
+                acquire(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("queue lock is busy")
+                time.sleep(0.05)
+        while True:
+            try:
+                os.link(kernel, marker)
+                break
+            except FileExistsError:
+                try:
+                    owned = os.path.samestat(os.fstat(fd), marker.lstat())
+                except FileNotFoundError:
+                    continue
+                if owned:
+                    break  # previous upgraded writer died; we now hold its kernel lock
+                if time.monotonic() >= deadline:
+                    raise ValueError("queue lock is busy; never remove another process's lock")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            marker.unlink()
     finally:
-        lock.rmdir()
+        os.close(fd)
 
 
 def atomic_write(path, data):
@@ -205,12 +244,41 @@ def run(args):
     with queue_lock(root, args.lock_timeout):
         data = (root / "images-todo.md").read_bytes()
         entries = blocks(data)
+        if args.command == "append":
+            if not re.fullmatch(r"IMG-[A-Za-z0-9-]+", args.id) or not re.fullmatch(r"[A-Za-z0-9._-]+\.png", args.name):
+                raise ValueError("invalid image id or filename")
+            body = sys.stdin.read().rstrip("\n")
+            if "Prompt:" not in body or any(entry["id"] == args.id for entry in entries):
+                raise ValueError("missing prompt or request already exists")
+            save = root / "out" / args.id / args.name
+            save.parent.mkdir(parents=True, exist_ok=True)
+            entry = f"\n## {args.id}\n- Status: pending\n- Filed: {utcnow()}\n- Save to: {save}\n{body}\n"
+            atomic_write(root / "images-todo.md", data + entry.encode())
+            return str(save)
+        if args.command == "candidates":
+            # Emit just one pending ID and stream reservations. Tokens and prompts
+            # never cross this inspection interface.
+            pending = False
+            claims = {file.stem for file in (root / "out" / ".claims").glob("*.json")}
+            for entry in entries:
+                if entry["status"] not in ("pending", "in-progress"):
+                    continue
+                claim = read_claim(root, entry["id"]) if entry["id"] in claims else None
+                if claim and claim["state"] == "reserved":
+                    print(json.dumps({"id":entry["id"], "worker":claim["worker"]}))
+                elif not claim and entry["status"] == "pending" and not pending:
+                    print(json.dumps({"id":entry["id"]}))
+                    pending = True
+            return None
         if args.command == "list":
             return [{"id": b["id"], "status": b["status"], "reservation": read_claim(root, b["id"])}
                     for b in entries if b["status"] in ("pending", "in-progress")]
         if args.command == "claim":
             # Resume this chat's reservation before acquiring another job.
+            claimed_ids = {file.stem for file in (root / "out" / ".claims").glob("*.json")}
             for block in entries:
+                if block["id"] not in claimed_ids or block["status"] not in ("pending","in-progress"):
+                    continue
                 claim = read_claim(root, block["id"])
                 if claim and claim["worker"] == args.worker and claim["state"] == "reserved" and block["status"] in ("pending", "in-progress"):
                     if block["fingerprint"] != claim["request_sha256"]:
@@ -298,6 +366,10 @@ def main():
     parser.add_argument("--lock-timeout", type=float, default=10)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
+    commands.add_parser("candidates")
+    append = commands.add_parser("append")
+    append.add_argument("id")
+    append.add_argument("name")
     claim = commands.add_parser("claim")
     claim.add_argument("--worker", required=True)
     for command in ("check", "publish", "finish"):
@@ -313,7 +385,11 @@ def main():
             sub.add_argument("--reason")
     args = parser.parse_args()
     try:
-        print(json.dumps(run(args), ensure_ascii=False))
+        result = run(args)
+        if args.command == "append":
+            print(result)
+        elif args.command != "candidates":
+            print(json.dumps(result, ensure_ascii=False))
     except (ValueError, OSError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)

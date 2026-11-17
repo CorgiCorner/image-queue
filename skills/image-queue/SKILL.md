@@ -13,6 +13,8 @@ Read `get_generation_source` and `list_models` before the first request when the
 
 - `queue` means the local Codex runner using the ChatGPT plan. It requires the machine and runner to be available. A queued request is not proof that generation has started.
 - `api` means a separately billed OpenAI API call using the locally configured key. A working ChatGPT plan does not provide API credit.
+- Use `get_queue_processing` to check each executor’s heartbeat, waiting/running counts, pause, last delivery and stop reason. Model discovery confirms catalog access. For queued jobs use `get_job` or `wait_for_job` and read `execution.nextAction`. Local API work requires the running dashboard.
+- Use `set_queue_processing` when the user asks to change processing. A global resume preserves individual pauses. A source resume clears its stop and failure window. Resuming API may start paid waiting requests. A failed or uncertain image needs its own recovery decision.
 - `set_generation_source` saves the default for **new** requests. It does not migrate existing jobs, generate an image, resume the runner, or retry failures. Pass `source` and optionally a configured OpenAI `model`.
 - `request_image` / `request_images` use the saved default when `source` is omitted. Pass an explicit source for a one-off override. Preserve the user's choice; do not switch to paid API as an autonomous fallback.
 

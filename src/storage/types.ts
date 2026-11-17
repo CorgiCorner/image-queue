@@ -14,7 +14,7 @@ export interface Storage {
   put<T>(collection: string, id: string, value: T): Promise<void>;
   delete(collection: string, id: string): Promise<void>;
   lock<T>(key: string, work: () => Promise<T>): Promise<T>;
-  putBlob(key: string, value: Uint8Array, mime: string): Promise<void>;
+  putBlob(key: string, value: Uint8Array, mime: string, projectId?: string): Promise<void>;
   deleteBlob(key: string): Promise<void>;
   getBlob(
     key: string,

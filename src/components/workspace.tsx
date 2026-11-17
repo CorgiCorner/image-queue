@@ -28,6 +28,8 @@ import { Notification } from "./notification";
 import { SavedStatus } from "./saved-status";
 import { CopyButton } from "./copy-button";
 import { SettingsNav } from "./settings-nav";
+import { QueueProcessing } from "./queue-processing";
+import type { ProcessingStatus } from "../core/processing";
 import { ConnectedProviderRow } from "./connected-provider-row";
 import { AgentConnection } from "./agent-connection";
 import { Progress } from "./ui/progress";
@@ -71,6 +73,7 @@ import {
   markNotesAction,
   correctionAction,
   moveJobAction,
+  processingAction,
   poolConfigAction,
   recheckLocalRunnerAction,
   pauseLocalRunnerAction,
@@ -116,6 +119,9 @@ import { ImagePreview } from "./image-preview";
 type State = {
   generationSource?: {source:"queue"|"api";provider?:"openai";model?:string};
   platformSupport?: {tested:boolean;platform:string;architecture:string;warning?:string};
+  processing?: ProcessingStatus;
+  providerCheckedAt?:string;
+  codexConnection?:{login:string;checkedAt:string};
   localRunner?: {mode:string;running:number;enabled:number;desiredWorkers?:number;paused?:boolean;blockedReason?:string;blockedJobId?:string;canResume?:boolean;resumeAt?:string};
   mcpLaunch?: McpLaunch;
   projects: Project[];
@@ -780,12 +786,16 @@ export function Workspace({
   const [reservationReviewId,setReservationReviewId]=useState<string>();
   const health = data.localRunner ? (data.localRunner.paused ? "Workers paused" : data.localRunner.blockedReason ? "Local execution needs attention" : data.localRunner.enabled === 0 ? "Workers paused" : data.localRunner.running ? `${data.localRunner.running} generating` : "Ready for requests") : workerHealth(data.pool, data.pulses, healthNow);
   const stoppedJob = data.localRunner?.blockedJobId ? data.jobs.find(job => job.id === data.localRunner?.blockedJobId) : undefined;
-  const workersPaused = data.localRunner ? (data.localRunner.paused ?? data.localRunner.enabled === 0) : data.pool.workers === 0;
+  const workersPaused = data.processing?.paused || (data.processing?.queue.paused ?? data.localRunner?.paused ?? (data.localRunner ? data.localRunner.enabled === 0 : data.pool.workers === 0));
   const slotsWithoutHeartbeat = Array.from({ length: data.pool.workers }, (_, index) => index + 1)
     .filter(slot => !data.pulses.some(pulse => pulse.slot === slot)).length;
   const queueWaitState = { paused: workersPaused, blockedReason: data.localRunner?.blockedReason, resumesAutomatically: Boolean(data.localRunner?.resumeAt), notResponding: health === "Workers not responding" };
-  const queueRequestsNotice = queueWaitNotice(queueWaitState);
-  const queueVersionNotice = queueWaitNotice(queueWaitState, "version");
+  const queueRequestsNotice = data.processing?.paused ? "All processing is paused. Requests will wait until you resume." : queueWaitNotice(queueWaitState);
+  const queueVersionNotice = data.processing?.paused ? "All processing is paused. This version will wait until you resume." : queueWaitNotice(queueWaitState, "version");
+  const manageProcessingHref = data.processing && (data.localRunner || source==="api") ? "/settings#queue-processing" : "/settings#worker-pool";
+  const apiNotice = !data.processing ? undefined : data.processing.paused || data.processing.api.paused
+    ? "API processing is paused. Requests will wait in the queue."
+    : data.processing.api.blockedReason ?? (!data.processing.api.online ? "The API executor is offline. Keep the local dashboard running to process requests." : undefined);
   const workersUnavailable = queueRequestsNotice !== undefined;
   const connectedProviders = [
     ...new Set(data.models.filter(entry => entry.provider === "openai").map((entry) => entry.provider)),
@@ -1884,7 +1894,7 @@ export function Workspace({
         </header>
         {settingsPage ? (
           <section className="settings-page">
-            <SettingsNav cloud={data.cloud} localRunner={Boolean(data.localRunner)} />
+            <SettingsNav cloud={data.cloud} localRunner={Boolean(data.localRunner)} processing={Boolean(data.processing)} />
             <div className="settings-content">
             {notice && <p className="settings-notice" role="status">{notice}</p>}
             <header className="settings-heading">
@@ -1913,6 +1923,8 @@ export function Workspace({
               </header>
               <div className="settings-subsection">
                 <h3 className="settings-subheading">Connected providers</h3>
+                {data.providerCheckedAt && <p className="settings-row-hint">OpenAI model access checked {new Date(data.providerCheckedAt).toLocaleString()}.</p>}
+                {data.codexConnection && <p className="settings-row-hint">Codex sign-in · {data.codexConnection.login==="chatgpt"?"ChatGPT":data.codexConnection.login==="api-key"?"API key":"Sign-in required"} · Checked {new Date(data.codexConnection.checkedAt).toLocaleString()}.</p>}
                 {connectedProviders.length === 0 ? (
                   <p className="settings-empty">No provider connected yet.</p>
                 ) : (
@@ -2006,7 +2018,7 @@ export function Workspace({
                 </div>
                 <div className="settings-card-footer">
                   <div className="settings-footer-status">
-                    <p className="provider-connection-status" role="status">{connectedProviders.includes(provider) ? "Connected" : "Not connected"}</p>
+                    <p className="provider-connection-status" role="status">{connectedProviders.includes(provider) ? "Model catalog saved" : "Not connected"}</p>
                     {providerSuccess && <p className="provider-success" role="status">{providerSuccess}</p>}
                   </div>
                   <Button type="submit" disabled={busy}>
@@ -2016,9 +2028,15 @@ export function Workspace({
                 </div>
               </form>
             </section>
+            {data.processing && <QueueProcessing state={{...data.processing,queue:{...data.processing.queue,
+              blockedReason:data.localRunner?.blockedReason ?? data.processing.queue.blockedReason}}}
+              localCodex={!!data.localRunner} waiting={{
+                queue:data.jobs.filter(job=>job.source==="queue" && job.status==="queued" && !job.trashedAt && !job.archivedAt).length,
+                api:data.jobs.filter(job=>job.source==="api" && job.status==="queued" && !job.trashedAt && !job.archivedAt).length,
+              }} onSave={async input=>{try{showError(await processingAction(input));await refresh();}catch{setNotice("Could not update queue processing.");}}}/>}
             <section id="worker-pool" className="settings-card" aria-labelledby="worker-pool-title">
               <header className="settings-card-header">
-                <h2 id="worker-pool-title">{data.localRunner ? "Codex queue" : "Worker pool"}</h2>
+                <h2 id="worker-pool-title">{data.localRunner ? data.processing ? "Codex setup" : "Codex queue" : "Worker pool"}</h2>
                 <p>
                   {data.localRunner
                     ? "Generate through your local Codex installation. Pausing lets running images finish. Keep image-queue running."
@@ -2032,7 +2050,7 @@ export function Workspace({
                 </div>
                 <a className={buttonVariants({ variant: "default" })} href={workerSetupLink(data.mcpLaunch, data.pool, dashboardOrigin)}>Set up in Codex</a>
               </div>}
-              {data.localRunner ? <div className="settings-subsection"><div className="runner-state-row"><h3 className="settings-subheading">{data.localRunner.blockedReason ? "Queue stopped — action needed" : data.localRunner.paused ? "Paused" : data.localRunner.running ? "Generating" : "Ready"}</h3><Button variant="secondary" disabled={poolSaving} onClick={async()=>{setPoolSaving(true);try{showError(await pauseLocalRunnerAction({paused:!(data.localRunner?.paused || data.localRunner?.blockedReason)}));await refresh();}finally{setPoolSaving(false);}}}>{data.localRunner.paused || data.localRunner.blockedReason ? "Resume queue" : "Pause"}</Button></div><p className="settings-row-hint">{data.localRunner.running} generating · {data.localRunner.desiredWorkers ?? data.localRunner.enabled} {(data.localRunner.desiredWorkers ?? data.localRunner.enabled) === 1 ? "parallel request" : "parallel requests"}.{data.pulses.length > 0 && " Scheduled chats take no new requests."}</p>{data.localRunner.blockedReason && <div className="detail-notice runner-attention" role="status"><p>{workerStatusMessage(data.localRunner.blockedReason)}{data.localRunner.resumeAt && " Pending requests will resume automatically after the limit resets."}</p><p>{data.localRunner.resumeAt ? "The remaining queue will resume after the verified quota reset." : "The remaining queue is stopped. Review the affected image below, then choose Resume queue to continue other requests. The interrupted image will not be retried automatically."}</p><div className="runner-attention-actions">{stoppedJob && <Button variant="outline" onClick={() => setSelected(stoppedJob)}>Inspect stopped image</Button>}{/CLI (is unavailable|could not be located)/.test(data.localRunner.blockedReason) && <CopyButton variant="outline" size="default" value="npm install -g @openai/codex" label="Copy install command" onSuccess={() => setNotice("Install command copied")} onError={() => setNotice("Could not copy the install command")}>Copy install command</CopyButton>}{/Sign in|API key/.test(data.localRunner.blockedReason) && <CopyButton variant="outline" size="default" value="codex login" label="Copy sign-in command" onSuccess={() => setNotice("Sign-in command copied")} onError={() => setNotice("Could not copy the sign-in command")}>Copy sign-in command</CopyButton>}<Button variant="secondary" disabled={poolSaving} onClick={async () => {setPoolSaving(true);try{showError(await recheckLocalRunnerAction({}));await refresh();}finally{setPoolSaving(false);}}}>Check again</Button></div></div>}</div> : <div className="settings-subsection">
+              {data.localRunner ? <div className="settings-subsection">{!data.processing && <><div className="runner-state-row"><h3 className="settings-subheading">{data.localRunner.blockedReason ? "Queue stopped — action needed" : data.localRunner.paused ? "Paused" : data.localRunner.running ? "Generating" : "Ready"}</h3><Button variant="secondary" disabled={poolSaving} onClick={async()=>{setPoolSaving(true);try{showError(await pauseLocalRunnerAction({paused:!(data.localRunner?.paused || data.localRunner?.blockedReason)}));await refresh();}finally{setPoolSaving(false);}}}>{data.localRunner.paused || data.localRunner.blockedReason ? "Resume queue" : "Pause"}</Button></div><p className="settings-row-hint">{data.localRunner.running} generating · {data.localRunner.desiredWorkers ?? data.localRunner.enabled} {(data.localRunner.desiredWorkers ?? data.localRunner.enabled) === 1 ? "parallel request" : "parallel requests"}.{data.pulses.length > 0 && " Scheduled chats take no new requests."}</p></>}{data.localRunner.blockedReason && <div className="detail-notice runner-attention" role="status"><p>{workerStatusMessage(data.localRunner.blockedReason)}{data.localRunner.resumeAt && " Pending requests will resume automatically after the limit resets."}</p><p>{data.localRunner.resumeAt ? "The remaining queue will resume after the verified quota reset." : "The remaining queue is stopped. Review the affected image below, then choose Resume queue to continue other requests. The interrupted image will not be retried automatically."}</p><div className="runner-attention-actions">{stoppedJob && <Button variant="outline" onClick={() => setSelected(stoppedJob)}>Inspect stopped image</Button>}{/CLI (is unavailable|could not be located)/.test(data.localRunner.blockedReason) && <CopyButton variant="outline" size="default" value="npm install -g @openai/codex" label="Copy install command" onSuccess={() => setNotice("Install command copied")} onError={() => setNotice("Could not copy the install command")}>Copy install command</CopyButton>}{/Sign in|API key/.test(data.localRunner.blockedReason) && <CopyButton variant="outline" size="default" value="codex login" label="Copy sign-in command" onSuccess={() => setNotice("Sign-in command copied")} onError={() => setNotice("Could not copy the sign-in command")}>Copy sign-in command</CopyButton>}<Button variant="secondary" disabled={poolSaving} onClick={async () => {setPoolSaving(true);try{showError(await recheckLocalRunnerAction({}));await refresh();}finally{setPoolSaving(false);}}}>Check again</Button></div></div>}</div> : <div className="settings-subsection">
                 <h3 className="settings-subheading">Workers</h3>
                 {data.pool.workers === 0 && !data.pulses.some(pulse => pulse.draining) && <p className="settings-empty">Workers are turned off.</p>}
                 {slotsWithoutHeartbeat > 0 && (
@@ -2082,7 +2100,7 @@ export function Workspace({
                   if (poolSaving) return;
                   setPoolSaving(true);
                   try {
-                    const result = await poolConfigAction(poolDraft);
+                    const result = await poolConfigAction({...poolDraft, preserveLocalLimit: !!data.processing});
                     showError(result);
                     await refresh();
                     setPoolSaveRevision(value => value + 1);
@@ -2150,7 +2168,7 @@ export function Workspace({
                       min: 1,
                     },
                   ] as const
-                ).filter(field => !data.localRunner || field.key === "workers").map((field) => (
+                ).filter(field => !data.localRunner || (!data.processing && field.key === "workers")).map((field) => (
                   <div className="settings-row" key={field.key}>
                     <div className="settings-row-text">
                       <Label htmlFor={`pool-${field.key}`}>{field.label}</Label>
@@ -2408,7 +2426,7 @@ export function Workspace({
                   <Clock3 size={20} aria-hidden="true" />
                   <div><strong>{isSizeMismatchError(data.localRunner.blockedReason) ? "Codex queue stopped — image size mismatch" : "Queue stopped — action needed"}</strong><p>{isSizeMismatchError(data.localRunner.blockedReason) ? `The image was generated${stoppedJob?.providerResultSize ? ` at ${stoppedJob.providerResultSize.width}×${stoppedJob.providerResultSize.height}` : ""}, but does not match the requested size. Inspect the original before retrying. API requests can still run.` : <>{workerStatusMessage(data.localRunner.blockedReason)} {data.localRunner.resumeAt ? "Queued images will resume automatically after the limit resets." : data.localRunner.running > 0 ? `${data.localRunner.running} images are still finishing. New Codex requests wait until you resume.` : "Nothing is generating. Waiting images stay in the queue until you resume it."}</>}</p></div>
                   {stoppedJob && <Button variant="outline" onClick={() => setSelected(stoppedJob)}>Inspect stopped image</Button>}
-                  <Link className={buttonVariants({ variant: "secondary" })} href="/settings#worker-pool" prefetch>Manage workers</Link>
+                  <Link className={buttonVariants({ variant: "secondary" })} href={manageProcessingHref} prefetch>{data.processing ? "Manage processing" : "Manage workers"}</Link>
                 </div>
                 ) : (
                 <div className="queue-paused-notice" role="status">
@@ -2416,10 +2434,10 @@ export function Workspace({
                   <div><strong>Generation paused</strong><p>Queued images are waiting. Resume to start generating on this machine.</p></div>
                   <Button variant="secondary" disabled={poolSaving} onClick={async () => {
                     setPoolSaving(true);
-                    try { showError(await pauseLocalRunnerAction({ paused: false })); await refresh(); }
+                    try { showError(data.processing?.paused ? await processingAction({source:"all", paused:false}) : await pauseLocalRunnerAction({ paused: false })); await refresh(); }
                     catch (error) { setNotice((error as Error).message); }
                     finally { setPoolSaving(false); }
-                  }}>Resume</Button>
+                  }}>{data.processing?.paused ? "Resume all" : "Resume"}</Button>
                 </div>
                 )
               )}
@@ -2722,10 +2740,10 @@ export function Workspace({
                 >
                   {composerExpanded ? "Hide options" : "Image options"}
                 </Button>
-                <WorkerAlert enabled={source === "queue" && loaded} unavailable={workersUnavailable}
+                <WorkerAlert enabled={loaded && (source==="queue" || !!data.processing)} unavailable={source==="queue" ? workersUnavailable : !!apiNotice}
                   instantHeight={priorComposerSource.current !== source}
-                  message={queueRequestsNotice ?? ""}
-                  manageHref="/settings#worker-pool" />
+                  message={(source==="queue" ? queueRequestsNotice : apiNotice) ?? ""}
+                  manageHref={manageProcessingHref} />
                 <div className="composer-footer">
                   <div className="composer-options">
                     <input
@@ -3403,10 +3421,10 @@ export function Workspace({
                         options={models.map(item => ({value:item.id,label:item.name,disabled:!item.references}))} />
                     </div>}
                   </div>
-                  <WorkerAlert enabled={source === "queue"} unavailable={workersUnavailable}
+                  <WorkerAlert enabled={source==="queue" || !!data.processing} unavailable={source==="queue" ? workersUnavailable : !!apiNotice}
                     instantHeight={priorComposerSource.current !== source}
-                    message={queueVersionNotice ?? ""}
-                    manageHref="/settings#worker-pool" />
+                    message={(source==="queue" ? queueVersionNotice : apiNotice) ?? ""}
+                    manageHref={manageProcessingHref} />
                   {correctionNeedsConnection ? <>
                     <p className="text-muted-foreground" role="status">Connect OpenAI to edit this image with your API key.</p>
                     <Button onClick={() => router.push("/settings?provider=openai")}>Connect OpenAI in Settings</Button>

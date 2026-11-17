@@ -10,12 +10,13 @@ import { galleryQuerySchema, queryGallery } from "../core/gallery-query";
 import { visibleJobs } from "../core/retention";
 import { configureAppViews } from "./apps";
 import { protectToolErrors } from "./error-boundary";
-import { UserFacingError } from "../core/user-facing-error";
+import { changeProcessing, processingInput, failurePolicy, processingStatus } from "../core/processing";
+import { UserFacingError, publicErrorMessage } from "../core/user-facing-error";
 import { requireReleaseProvider } from "../core/release-providers";
 import { noteInput } from "../core/notes";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { enqueue, refreshedJobs, retryImageJob, service } from "../core/runtime";
+import { enqueue, refreshedJob, refreshedJobs, retryImageJob, service } from "../core/runtime";
 import { idSchema, projectSchema, type Job, type Model, requestSchema, retryImageSchema } from "../core/schema";
 import { executionStatus } from "./execution-status";
 import type { Storage } from "../storage/types";
@@ -59,21 +60,21 @@ async function normalizeRequest(raw: z.infer<typeof mcpRequestSchema>, store: St
 }
 
 const response = async (value: unknown, store?: Storage, execution?: Awaited<ReturnType<typeof executionStatus>>) => {
-  const isQueueJob = (item: unknown): item is Job => !!item && typeof item === "object" && "source" in item && item.source === "queue" && "status" in item;
-  if (isQueueJob(value) || (Array.isArray(value) && value.some(isQueueJob))) {
-    store ??= (await service()).store;
-    execution ??= await executionStatus(store);
-  }
+  const isJob = (item: unknown): item is Job => !!item && typeof item === "object" && "source" in item && ["queue","api"].includes(String(item.source)) && "status" in item;
+  const bySource = new Map<Job["source"],Promise<Awaited<ReturnType<typeof executionStatus>>>>();
+  if (isJob(value) || (Array.isArray(value) && value.some(isJob))) store ??= (await service()).store;
   const withRecovery = async (item: unknown) => {
-    if (!item || typeof item !== "object" || !("status" in item)) return item;
-    const recovery = jobRecovery(item as Job);
-    if (isQueueJob(item)) {
+    if (!isJob(item)) return item;
+    const recovery = jobRecovery(item);
+    if (!bySource.has(item.source)) bySource.set(item.source,execution ? Promise.resolve(execution) : executionStatus(store!,item.source));
+    const status = await bySource.get(item.source);
+    if (item.source==="queue") {
       const originalPath = recovery?.action === "inspect_size_mismatch"
         ? (await store?.get<{ original?: string }>("generation-artifacts", item.id))?.original
         : undefined;
-      return { ...item, execution, recovery: originalPath ? { ...recovery, originalPath } : recovery };
+      return { ...item, execution:status, recovery: originalPath ? { ...recovery, originalPath } : recovery };
     }
-    return recovery ? {...item, recovery} : item;
+    return {...item, execution:status, ...(recovery ? {recovery} : {})};
   };
   value = Array.isArray(value) ? await Promise.all(value.map(withRecovery)) : await withRecovery(value);
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -84,6 +85,28 @@ export function createServer() {
     { capabilities: { resources: { listChanged: true } } },
   );
   protectToolErrors(server);
+  server.registerTool("get_queue_processing", {
+    description:"Read local processing state, concurrency, failure policy and last delivery separately for Codex and OpenAI API.",
+  },async()=>{
+    const api=await service();
+    if ((await import("../core/config")).configuration("STORAGE_DRIVER")==="cloudflare") return response({mode:"hosted",nextAction:"Use job status to inspect hosted API execution."});
+    const { configuredQueueRoot, pendingQueueCount } = await import("../sources/queue");
+    const { waitingApiCount } = await import("../core/api-runner");
+    const [state, queueWaiting, apiWaiting] = await Promise.all([
+      processingStatus(api.store),
+      configuredQueueRoot(api.store).then(pendingQueueCount),
+      waitingApiCount(api.store),
+    ]);
+    return response({ ...state, queue: { ...state.queue, waiting: queueWaiting }, api: { ...state.api, waiting: apiWaiting } });
+  });
+  server.registerTool("set_queue_processing", {
+    description:"Change local processing for both sources (all + paused), or set per-source pause, parallel workers and failure policy. limit 0 continues independent requests. Resume clears this source's stop; global resume preserves individual pauses. Resuming API permits billed pending work. Only resume at the user's direction.",
+    inputSchema:{source:z.enum(["all","queue","api"]),paused:z.boolean().optional(),workers:z.number().int().min(1).max(5).optional(),policy:failurePolicy.optional()},
+  },async input=>{
+    const store=(await service()).store;
+    await changeProcessing(store,processingInput.parse(input));
+    return response(await processingStatus(store));
+  });
   server.registerTool("get_generation_source",{description:"Read the saved default source and API model for new image requests. Existing requests keep their source."},async()=>response({preference:await readGenerationPreference((await service()).store)??{source:"queue"},existingRequestsChanged:false}));
   server.registerTool("set_generation_source",{
     description:"Set the default source (queue or api) and optional configured OpenAI image model for NEW requests. This does not generate images, retry old requests, resume Codex or change existing jobs. API image requests are billed to the configured key. Use the user's chosen source; never switch it merely to bypass an error.",
@@ -113,7 +136,7 @@ export function createServer() {
       const api = await service();
       const preference = await readGenerationPreference(api.store);
       const job = await api.create(await normalizeRequest(input, api.store, preference));
-      // Keep execution in this call so a stdio exit cannot abandon API work.
+      // Local API requests are durable before this call returns.
       if (job.status === "queued") await enqueue(job.id);
       return response(await api.store.get<Job>("jobs", job.id), api.store);
     },
@@ -158,7 +181,7 @@ export function createServer() {
     },
     async ({ id }) =>
       response(
-        (await refreshedJobs()).find((j) => j.id === id) ?? {
+        (await refreshedJob(id)) ?? {
           error: "Not found",
         },
       ),
@@ -171,7 +194,7 @@ export function createServer() {
     },
     async ({ id }) =>
       response(
-        (await refreshedJobs()).find((job) => job.id === id) ?? {
+        (await refreshedJob(id)) ?? {
           error: "Not found",
         },
       ),
@@ -185,13 +208,17 @@ export function createServer() {
     },
     async ({ requests }) => {
       const api = await service();
-      const jobs: Job[] = [];
+      const jobs: (Job | {id:string;error:string})[] = [];
       const preference = await readGenerationPreference(api.store);
-      const normalized = await Promise.all(requests.map(input => normalizeRequest(input, api.store, preference)));
+      const normalized = await Promise.all(requests.map(raw => normalizeRequest(raw,api.store,preference)));
       for (const input of normalized) {
-        const job = await api.create(input);
-        if (job.status === "queued") await enqueue(job.id);
-        jobs.push((await api.store.get<Job>("jobs", job.id))!);
+        try {
+          const job = await api.create(input);
+          if (job.status === "queued") await enqueue(job.id);
+          jobs.push((await api.store.get<Job>("jobs", job.id))!);
+        } catch (error) {
+          jobs.push({id:`IMG-${input.idempotencyKey}`,error:publicErrorMessage(error)});
+        }
       }
       return response(jobs, api.store);
     },
@@ -211,15 +238,15 @@ export function createServer() {
       let job: Job | undefined;
       do {
         signal.throwIfAborted();
-        job = (await refreshedJobs(api)).find((j) => j.id === id);
+        job = await refreshedJob(id,api);
         if (
           !job ||
           !["queued", "running"].includes(job.status) ||
           Date.now() >= deadline
         )
           break;
-        if (job.source === "queue" && job.status === "queued" && !job.claim) {
-          const execution = await executionStatus(api.store);
+        if (job.status === "queued" && !job.claim) {
+          const execution = await executionStatus(api.store,job.source);
           if (execution.requiresUserAction) return response(job, api.store, execution);
         }
         const remaining = deadline - Date.now();

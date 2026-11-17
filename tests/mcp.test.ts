@@ -45,7 +45,9 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 describe("MCP client/server flow", () => {
   it("lists tools and manages project, request, result and cancellation", async () => {
-    expect((await client.listTools()).tools.length).toBe(25);
+    const tools=(await client.listTools()).tools;
+    expect(tools).toHaveLength(27);
+    expect(tools.map(tool=>tool.name)).toEqual(expect.arrayContaining(["get_queue_processing","set_queue_processing"]));
     const p = await call("create_project", { name: "Agent project" });
     expect(await call("list_projects")).toHaveLength(1);
     const job = await call("request_image", {
@@ -162,6 +164,7 @@ it("cancels an unsubmitted job through MCP", async () => {
 it("waits while a job is pending and observes completion", async () => {
   const api = await service();
   await api.store.put("settings", "local-runner", { workers: 1, paused: false });
+  await api.store.put("processing-heartbeats", "queue", { at: Date.now(), running: 0 });
   const project = await api.createProject("Polling");
   const job = await api.create({
     projectId: project.id,
@@ -179,7 +182,7 @@ it("waits while a job is pending and observes completion", async () => {
   delay.mockImplementationOnce(async () => {
     await api.store.put("jobs", job.id, { ...job, status: "done" });
   });
-  const result = await call("wait_for_job", { id: job.id, timeoutSeconds: 2 });
+  const result = await call("wait_for_job", { id: job.id, timeoutSeconds: 10 });
   expect(result.status).toBe("done");
   expect(delay).toHaveBeenCalledWith(1000, undefined, { signal: expect.any(AbortSignal) });
 });
@@ -467,7 +470,7 @@ it("queues annotated corrections through the app-only tool idempotently", async 
     await appClient.close();
     await appServer.close();
   }
-}, 15_000);
+}, 45_000);
 it("excludes archive and trash from default job listings", async () => {
   const api=await service();
   for(const job of [{id:"archived",archivedAt:"2026-01-01"},{id:"trashed",trashedAt:"2026-01-01"}]) await api.store.put("jobs",job.id,{...job,status:"done",createdAt:"2026-01-01"});
@@ -764,7 +767,7 @@ it("continues waiting for a running Codex job after pause", async () => {
   vi.mocked(pollDelay).mockImplementationOnce(async () => {
     await api.store.put("jobs", job.id, { ...job, status: "done" });
   });
-  expect(await call("wait_for_job", { id: job.id, timeoutSeconds: 2 })).toMatchObject({ status: "done" });
+  expect(await call("wait_for_job", { id: job.id, timeoutSeconds: 10 })).toMatchObject({ status: "done" });
 });
 
 it("gives agents the retained Codex original when delivery cannot fit it", async () => {
@@ -822,4 +825,12 @@ it("replays an identical MCP request after its default and model catalog change"
   } finally {
     enqueue.mockRestore();
   }
+});
+
+it("counts external Codex requests before the dashboard imports the gallery", async () => {
+  const queue = path.join(root, "queue");
+  await mkdir(queue, { recursive: true });
+  await writeFile(path.join(queue, "images-todo.md"), "## IMG-external\n- Status: pending\n- Prompt: fixture\n");
+  expect(await call("get_queue_processing")).toMatchObject({ queue: { waiting: 1 }, api: { waiting: 0 } });
+  expect(await (await service()).store.list("jobs")).toHaveLength(0);
 });

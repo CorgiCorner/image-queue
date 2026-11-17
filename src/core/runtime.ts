@@ -71,11 +71,29 @@ export async function retryBlockedQueueJob(id: string, acknowledgeUncertain = fa
   });
 }
 
+// Submitters only leave durable work for the local dashboard. Cloudflare has its own request lifecycle.
 export async function enqueue(id: string) {
   const store = await storage();
+  const job = await store.get<Job>("jobs", id);
+  if (job?.status !== "queued") return;
+  if (job.source === "api" && configuration("STORAGE_DRIVER") !== "cloudflare") {
+    await store.put("api-pending", id, { id, createdAt: job.createdAt });
+    (globalThis as typeof globalThis & {imageQueueApiRunner?: {wake():void}}).imageQueueApiRunner?.wake();
+    return;
+  }
+  await executeImageJob(id, store);
+}
+
+export function mergeApiResult(current:Job,result:Job):Job {
+  const {status,error,requestedSize,generatedSize,providerResultSize,width,height,blobKey,updatedAt,provenance}=result;
+  return {...current,status,error,requestedSize,generatedSize,providerResultSize,width,height,blobKey,updatedAt,provenance};
+}
+
+export async function executeImageJob(id: string, store: Storage,
+  options?: { admit(commit: () => Promise<void>): Promise<boolean>; failed(message: string, stop?: boolean, resumeAt?: string): Promise<void> }) {
   await store.lock(id, async () => {
     const job = await store.get<Job>("jobs", id);
-    if (job?.status !== "queued") return;
+    if (job?.status !== "queued" || job.archivedAt || job.trashedAt) return;
     if (job.source === "queue") {
       if (job.outputPath) return;
       if (configuration("STORAGE_DRIVER") === "cloudflare")
@@ -106,6 +124,7 @@ export async function enqueue(id: string) {
       await runner?.wake();
       return;
     }
+    if(job.startedAt || job.attemptId)return;
     requireReleaseProvider(job.provider);
     const key = await readKey(store, job.provider);
     const models = applyVerifiedModelProfiles((await store.get<Model[]>("models", job.provider)) ?? []);
@@ -133,9 +152,7 @@ export async function enqueue(id: string) {
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await store.put("jobs", id, attempt);
-    try {
-      const refs = await Promise.all(
+    const refs = await Promise.all(
         job.referenceIds.map(async (refId) => {
           const ref = await store.get<Reference>("references", refId);
           const blob = ref && (await store.getBlob(ref.blobKey));
@@ -143,11 +160,18 @@ export async function enqueue(id: string) {
           return blob.bytes;
         }),
       );
+    const commit = () => store.put("jobs", id, attempt);
+    if (options) {
+      if (!(await options.admit(commit))) return;
+    } else await commit();
+    const { providerFailure } = await import("./provider-failure");
+    let received = false;
+    try {
       const { generate } = await import("../sources/providers");
       const result = await generate(job, key, refs, parsedProfile.data);
+      received = true;
       const blobKey = `results/${await import("./schema").then((schema) => schema.hash(result.bytes))}`;
-      await store.putBlob(blobKey, result.bytes, result.mime);
-      await store.put("jobs", id, {
+      const finished: Job = {
         ...attempt,
         status: result.adaptationError ? "blocked" : "done",
         error: result.adaptationError,
@@ -175,15 +199,20 @@ export async function enqueue(id: string) {
           null,
           2,
         ),
-      });
-    } catch {
-      await store.put("jobs", id, {
-        ...attempt,
-        status: "uncertain",
-        error:
-          "Generation did not complete locally. Check the provider before creating another request; it may have been charged.",
-        updatedAt: new Date().toISOString(),
-      });
+      };
+      // A restart can finish publication after the durable blob and receipt exist.
+      if (options) await store.put("api-results", id, finished);
+      await store.putBlob(blobKey, result.bytes, result.mime, job.projectId);
+      const current=await store.get<Job>("jobs",id);
+      if(current?.attemptId===attempt.attemptId)await store.put("jobs", id, mergeApiResult(current,finished));
+      if (result.adaptationError) await options?.failed(result.adaptationError);
+    } catch (error) {
+      // Once output is received, storage failures are recovered from the receipt, never resubmitted.
+      if (received) throw error;
+      const failure = providerFailure(error);
+      await options?.failed(failure.error, failure.stop, failure.resumeAt);
+      const current=await store.get<Job>("jobs",id);
+      if(current?.attemptId===attempt.attemptId)await store.put("jobs", id, { ...current, status: failure.status, error: failure.error, updatedAt: new Date().toISOString() });
     }
   });
 }
@@ -211,9 +240,9 @@ async function applyObserved(
     throw error;
   }
 }
-export async function refreshedJobs(existingService?: ImageService) {
+export async function refreshedJobs(existingService?: ImageService, selected?: Job[]) {
   const api = existingService ?? await service();
-  const jobs = await api.jobs();
+  const jobs = selected ?? await api.jobs();
   const localQueue = configuration("STORAGE_DRIVER") !== "cloudflare";
   let inspector: Promise<(job: Job) => Promise<Partial<Job>>> | undefined;
   const observeQueue = async () => {
@@ -223,12 +252,12 @@ export async function refreshedJobs(existingService?: ImageService) {
     ]);
     return queueInspector((await pathSettings(api.store)).queueDirectory);
   };
-  const observed = await Promise.all(
-    jobs.map(async (job) => {
+  const observe = async (job:Job) => {
       if (
         job.source === "api" &&
         job.status === "running" &&
-        Date.now() - Date.parse(job.startedAt!) > 300000
+        Date.now() - Date.parse(job.startedAt!) > 300000 &&
+        !(await api.store.get("api-inflight",job.id))
       ) {
         const updated: Job = {
           ...job,
@@ -248,12 +277,21 @@ export async function refreshedJobs(existingService?: ImageService) {
       inspector ??= observeQueue();
       const change = await (await inspector)(job);
       if(job.attemptId && job.startedAt && change.claim?.reserved)change.claim={...change.claim,reserved:undefined};
-      return { job, patch: Object.keys(change).length > 0 ? change : undefined };
-    }),
-  );
+      const changed=Object.entries(change).some(([key,value])=>JSON.stringify(job[key as keyof Job])!==JSON.stringify(value));
+      return {job,patch:changed ? change : undefined};
+  };
   const results: Job[] = [];
-  for (const { job, patch } of observed) {
-    results.push(patch ? await applyObserved(api.store, job, patch) : job);
+  // A gallery refresh can see thousands of reservations. Bound file descriptors
+  // and avoid taking a write lock for an unchanged observation.
+  for(let i=0;i<jobs.length;i+=32){
+    const batch=await Promise.all(jobs.slice(i,i+32).map(observe));
+    for(const {job,patch} of batch)results.push(patch ? await applyObserved(api.store,job,patch) : job);
   }
   return results;
+}
+
+export async function refreshedJob(id: string, api?: ImageService) {
+  api ??= await service();
+  const job = await api.store.get<Job>("jobs", id);
+  return job && (await refreshedJobs(api, [job]))[0];
 }

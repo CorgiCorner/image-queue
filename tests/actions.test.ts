@@ -1,6 +1,7 @@
 import { UserFacingError } from "../src/core/user-facing-error";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+afterEach(()=>vi.unstubAllEnvs());
 const mocks = vi.hoisted(() => ({
   after: vi.fn(),
   openFile: vi.fn(),
@@ -113,7 +114,8 @@ it("queues Codex images synchronously", async () => {
   await requestImageAction(request);
   expect(mocks.enqueue).toHaveBeenCalledWith("IMG-one");
 });
-it("executes API images after returning and preserves failure status", async () => {
+it("on Cloudflare executes API images after returning and preserves failure status", async () => {
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
   mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
   mocks.get.mockResolvedValue({ id: "IMG-one", source: "api", status: "queued" });
   mocks.get.mockImplementation(async (collection: string) => collection === "models"
@@ -206,7 +208,8 @@ it("saves pool configuration with validation", async () => {
   ).toBeTruthy();
 });
 
-it("maps non-Error background failures", async () => {
+it("maps non-Error Cloudflare background failures", async () => {
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
   mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
   mocks.get.mockResolvedValue({ id: "IMG-one", source: "api", status: "queued" });
   mocks.get.mockImplementation(async (collection: string) => collection === "models"
@@ -362,7 +365,8 @@ it("submits an explicit provider retry once and returns its job",async()=>{
   mocks.retryImageJob.mockResolvedValue({id:"IMG-retry",source:"api"});
   const result=await retryImageAction({id:"IMG-original",acknowledgeUncertain:true});
   expect(mocks.retryImageJob).toHaveBeenCalledWith("IMG-original",true);
-  expect(mocks.after).toHaveBeenCalledOnce();
+  expect(mocks.after).not.toHaveBeenCalled();
+  expect(mocks.enqueue).toHaveBeenCalledWith("IMG-retry");
   expect(result?.data).toEqual({id:"IMG-retry",source:"api"});
 });
 it("submits a prepared queue retry without background provider work",async()=>{
@@ -421,7 +425,8 @@ it("does not expose unexpected storage errors through server actions", async () 
 });
 
 
-it("preserves the safe missing-connection reason for background failures", async () => {
+it("preserves the safe missing-connection reason on Cloudflare", async () => {
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
   mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
   mocks.get.mockImplementation(async (collection: string) => collection === "models"
     ? [{ id: "gpt-image-1.5", provider: "openai" }]
@@ -454,7 +459,7 @@ it('rejects folder opening without a local origin and rejects arbitrary clients'
  await openAgentConfigDirectoryAction({client:'../../secret'} as never);expect(mocks.openConfigFolder).not.toHaveBeenCalled();
 });
 
-it("tests a connected provider with the stored key and changes nothing", async () => {
+it("records the model access check without changing the key or catalog", async () => {
   mocks.readKey.mockResolvedValueOnce("stored-private-key");
   mocks.discover.mockResolvedValueOnce(Array.from({ length: 12 }, (_, index) => ({ id: `gpt-image-${index}` })));
   const result = await testConnectionAction({ provider: "openai" });
@@ -463,7 +468,7 @@ it("tests a connected provider with the stored key and changes nothing", async (
   expect(mocks.discover).toHaveBeenCalledWith("openai", "stored-private-key");
   expect(JSON.stringify(result)).not.toContain("stored-private-key");
   expect(mocks.saveKey).not.toHaveBeenCalled();
-  expect(mocks.put).not.toHaveBeenCalled();
+  expect(mocks.put).toHaveBeenCalledExactlyOnceWith("connection-checks","openai",{checkedAt:expect.any(String)});
   expect(mocks.revalidatePath).not.toHaveBeenCalled();
 });
 it("reports a provider rejection of the stored key as one sentence", async () => {

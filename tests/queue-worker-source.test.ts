@@ -81,3 +81,19 @@ it('reads changed model and effort for the next claim without recreating the sou
  const job={id:'IMG-settings',prompt:'A square',width:32,height:32,transparent:false,referenceIds:[]} as unknown as Job;await appendQueue(root,job,[]);
  expect((await source.claim('local:settings',['codex-image']))?.job).toMatchObject({model:'gpt-6.1-terra',effort:'high'});
 });
+
+it('inspects and claims the first of 20,000 pending protocol entries with bounded helper output',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'iq-many-'));roots.push(root);
+ await copyFile(resolve('docs/protocol/worker.py'),join(root,'worker.py'));
+ const entries=Array.from({length:20000},(_,i)=>`## IMG-synthetic-long-request-name-${i}
+- Status: pending
+- Size: 64x64 PNG
+- References: none
+- Prompt: Fixture ${i}
+
+`);
+ await writeFile(join(root,'images-todo.md'),entries.join(''));
+ const source=queueWorkerSource(new MemoryStorage(),{queueRoot:root,workerId:'local:test',model:'gpt-6.1-sol',effort:'low'});
+ expect(await source.hasPending()).toBe(true);
+ expect((await source.claim('local:test',['codex-image']))?.job.id).toBe('IMG-synthetic-long-request-name-0');
+},60000);

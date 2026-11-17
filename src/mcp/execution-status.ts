@@ -1,31 +1,47 @@
+import {processingStatus} from "../core/processing";
 import { isSizeMismatchError, sizeMismatchRecoveryMessage } from "../core/job-recovery";
 import { configuration } from "../core/config";
 import { readLocalRunnerSettings } from "../core/local-runner-settings";
 import type { Storage } from "../storage/types";
 
 /** Persisted state works over stdio too, where the dashboard runner is a different process. */
-export async function executionStatus(store: Storage) {
+export async function executionStatus(store: Storage, source: "queue"|"api" = "queue") {
+  const controls = await processingStatus(store);
+  if (source === "api") {
+    if (configuration("STORAGE_DRIVER") === "cloudflare") return {
+      state: "hosted" as const, requiresUserAction: false, nextAction: "Check this job for the provider result.",
+    };
+    const api = controls.api;
+    const paused = controls.paused || api.paused;
+    const state = paused ? "paused" : api.blockedReason ? "blocked" : api.online ? "ready" : "offline";
+    return {state, paused, blockedReason:api.blockedReason, resumeAt:api.resumeAt, running:api.running, online:api.online,
+      requiresUserAction:paused || !api.online || (!!api.blockedReason && !api.resumeAt),
+      nextAction:paused ? "API processing is paused. Resume it in Settings > Processing when the user is ready."
+        : !api.online ? "Start the local dashboard to process accepted API requests."
+        : api.blockedReason ? api.blockedReason : "The API executor is available. Check this job for its result."};
+  }
   if (configuration("EXECUTOR") === "scheduled") return {
-    state: "scheduled" as const, requiresUserAction: false,
-    nextAction: "Keep the configured scheduled workers running. Check their heartbeat in the dashboard if the job does not progress.",
+    state: controls.paused || controls.queue.paused ? "paused" as const : "scheduled" as const, requiresUserAction: controls.paused || controls.queue.paused,
+    nextAction: controls.paused || controls.queue.paused ? "Resume the paused queue in Settings to process pending requests." : "Keep the configured scheduled workers running. Check their heartbeat in the dashboard if the job does not progress.",
   };
   const saved = await readLocalRunnerSettings(store);
-  const live = (globalThis as typeof globalThis & { imageQueueLocalRunner?: {status(): {paused:boolean;blockedReason?:string;blockedJobId?:string;resumeAt?:string}} }).imageQueueLocalRunner?.status();
-  const paused = live?.paused ?? saved?.paused ?? true;
-  const blockedReason = live?.blockedReason ?? saved?.blockedReason;
+  const live = (globalThis as typeof globalThis & { imageQueueLocalRunner?: {status(): {running?:number;paused:boolean;blockedReason?:string;blockedJobId?:string;resumeAt?:string}} }).imageQueueLocalRunner?.status();
+  const paused = controls.paused || controls.queue.paused;
+  const blockedReason = live?.blockedReason ?? controls.queue.blockedReason ?? saved?.blockedReason;
   const blockedJobId = live?.blockedJobId ?? saved?.blockedJobId;
   const resumeAt = live?.resumeAt ?? saved?.resumeAt;
-  const state = blockedReason ? "blocked" : paused ? "paused" : live ? "ready" : "configured";
-  return { state, paused, ...(blockedReason ? { blockedReason } : {}), ...(blockedJobId ? { blockedJobId } : {}), ...(resumeAt ? { resumeAt } : {}),
-    requiresUserAction: paused || (!!blockedReason && !resumeAt),
+  const online = !!live || controls.queue.online;
+  const state = blockedReason ? "blocked" : paused ? "paused" : online ? "ready" : "offline";
+  return { state, paused, online, running: live?.running ?? controls.queue.running, ...(blockedReason ? { blockedReason } : {}), ...(blockedJobId ? { blockedJobId } : {}), ...(resumeAt ? { resumeAt } : {}),
+    requiresUserAction: paused || !online || (!!blockedReason && !resumeAt),
     nextAction: resumeAt && !paused
       ? "The runner will check quota again at resumeAt. The failed or uncertain image is not retried automatically."
       : isSizeMismatchError(blockedReason)
         ? sizeMismatchRecoveryMessage
       : blockedReason
-        ? "Tell the user generation stopped and why. Open Settings > Codex queue, inspect the stopped image and follow recovery. Fix safe pre-generation errors and submit one corrected request; preserve an intentional pause. Ask the user to resume the remaining queue after an uncertain attempt. Do not retry an uncertain image without acknowledgement."
+        ? "Report the stop reason. Inspect the affected request and fix the cause. Resume Codex in Settings > Processing or with set_queue_processing when authorized. Inspect uncertain results before retrying."
         : paused
-          ? "Tell the user this image is queued but generation is paused. Ask them to click Resume in Settings > Codex queue; waiting or resubmitting will not start it."
-          : "Keep the local dashboard running. A configured runner is not proof that an image is generating; check this job's status.",
+          ? "This image is queued. Resume the paused control in Settings > Processing or with set_queue_processing when authorized."
+          : online ? "The Codex executor is available. Check this job for its result." : "Start the local dashboard to process accepted Codex requests.",
   };
 }

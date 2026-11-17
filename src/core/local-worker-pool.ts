@@ -1,6 +1,10 @@
 import {UserFacingError} from './user-facing-error';
 /** Scheduling is local code; the generation model never manages this pool. */
 export interface LocalWork { id: string }
+/** The protocol finished this individual request before a generator was launched. */
+export class RejectedQueueRequest extends UserFacingError {
+ constructor(readonly jobId:string,message:string){super(message);}
+}
 export interface LocalWorkerPorts<T extends LocalWork> {
   claim(allowed:()=>boolean): Promise<T | undefined>;
   /** Must commit the attempt before any generation process starts. */
@@ -8,6 +12,7 @@ export interface LocalWorkerPorts<T extends LocalWork> {
   execute(job: T, signal: AbortSignal): Promise<void>;
   complete(job: T): Promise<void>;
   uncertain(job: T, error: unknown): Promise<void>;
+  failed?(message: string, id: string): Promise<string | undefined>;
   report(error: unknown): void;
   blocked?(message:string,phase:'admission'|'generation',jobId?:string):Promise<void>;
 }
@@ -43,7 +48,14 @@ export class LocalWorkerPool<T extends LocalWork> {
       while (this.requested && !this.closed) {
         this.requested = false;
         while (!this.closed && !this.failure && this.active.size < this.limit) {
-          const job = await this.ports.claim(()=>!this.closed&&!this.failure&&this.active.size<this.limit);
+          let job:T|undefined;
+          try { job = await this.ports.claim(()=>!this.closed&&!this.failure&&this.active.size<this.limit); }
+          catch(error) {
+            if(!(error instanceof RejectedQueueRequest))throw error;
+            const reason=await this.ports.failed?.(error.message,error.jobId);
+            if(reason)this.block(reason);
+            continue;
+          }
           if (!job) break;
           // A claimed job is never discarded when pause happens during claim.
           if (this.active.has(job.id)) throw new Error('Duplicate local worker claim');
@@ -65,12 +77,17 @@ export class LocalWorkerPool<T extends LocalWork> {
       if (controller.signal.aborted) throw new Error('Generation cancelled before publication');
       await this.ports.complete(job);
     } catch (error) {
-      // Stop draining the backlog after a failed attempt, including quota/auth failures.
-      this.failure = error instanceof UserFacingError ? error.message : "Local execution paused after an unsuccessful attempt. Check the result before resuming.";
-      try { await this.ports.blocked?.(this.failure,'generation',job.id); } catch(saveError) { this.ports.report(saveError); }
-      // Never replay an ambiguous generation automatically.
-      try { await this.ports.uncertain(job, error); }
-      catch (saveError) { this.ports.report(saveError); }
+      const message = error instanceof UserFacingError ? error.message : "Local generation did not complete. Inspect the result before retrying.";
+      try {
+        await this.ports.uncertain(job, error);
+        const reason = await this.ports.failed?.(message, job.id);
+        if (reason) this.block(reason);
+      } catch (saveError) {
+        this.block("Could not record the failed attempt. Check storage before resuming.");
+        try { await this.ports.blocked?.(this.failure!, "admission", job.id); }
+        catch (persistError) { this.ports.report(persistError); }
+        this.ports.report(saveError);
+      }
       if (!begun) this.ports.report(error);
     } finally {
       this.active.delete(job.id);

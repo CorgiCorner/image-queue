@@ -50,7 +50,9 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
      throw error;
     });
     if(job.transparent && !(await hasTransparentPixels(fitted.bytes)))throw new UserFacingError('Generated image is not transparent. The result was retained for inspection; it was not published.');
-    const blobKey=await hash(fitted.bytes);await store.putBlob(blobKey,fitted.bytes,'image/png');
+    const blobKey=await hash(fitted.bytes);
+    const owner=await store.get<{projectId?:string}>('jobs',job.id);
+    await store.putBlob(blobKey,fitted.bytes,'image/png',owner?.projectId);
     await writeFile(path.join(attempt.directory,'provenance.md'),`Prompt: ${job.prompt}\nWorker model: ${job.model}\nGenerated: ${new Date().toISOString()}\n`,{mode:0o600});
     for(const name of ['receipt.json','provenance.md','events.jsonl','stderr.log']){
      try{await copyFile(path.join(attempt.directory,name),path.join(attempt.archive,name));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}

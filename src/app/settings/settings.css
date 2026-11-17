@@ -233,3 +233,12 @@
 .runner-advanced > summary:focus-visible { outline:2px solid var(--focus-ring); outline-offset:-2px; }
 
 .config-folder-button { justify-self: start; margin-top: 4px; }
+
+.processing-limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: 1rem;
+  padding-block: 1rem;
+}
+.processing-limits > p { grid-column: 1 / -1; }
+.processing-limits > button { justify-self: start; }

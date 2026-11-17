@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { constants } from "node:fs";
 import { UserFacingError } from "../core/user-facing-error";
 import { configuration } from "@/core/config";
 import {
@@ -6,7 +8,8 @@ import {
   readFile,
   realpath,
   rename,
-  rmdir,
+  lstat,
+  link,
   stat,
   unlink,
   writeFile,
@@ -119,21 +122,40 @@ export async function configuredQueueRoot(existingStore?: import("../storage/typ
   );
   return saved?.queueDirectory ?? queueRoot();
 }
+const currentLocks = new AsyncLocalStorage<ReadonlySet<string>>();
 export async function withQueueLock<T>(root: string, work: () => Promise<T>) {
   await mkdir(root, { recursive: true });
-  const lock = path.join(root, ".queue.lock");
-  try {
-    await mkdir(lock);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST")
-      throw new UserFacingError("Image queue is busy. Try again.");
-    throw error;
+  const canonicalRoot=await realpath(root);
+  const held=currentLocks.getStore();
+  if(held?.has(canonicalRoot))throw new UserFacingError("Image queue is busy. Try again.");
+  const marker = path.join(root, ".queue.lock");
+  const kernel = path.join(root, ".queue.kernel");
+  const handle = await open(kernel, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  const deadline = Date.now() + 10000;
+  async function wait() {
+    if (Date.now() >= deadline) throw new UserFacingError("Image queue is busy. Try again.");
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
   try {
-    return await work();
-  } finally {
-    await rmdir(lock);
-  }
+    const { default: native } = await import("fs-native-extensions");
+    while (!native.tryLock(handle.fd)) await wait();
+    const identity = await handle.stat();
+    for (;;) {
+      try { await link(kernel, marker); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const owner = await lstat(marker).catch((e: NodeJS.ErrnoException) => {
+          if (e.code !== "ENOENT") throw e;
+        });
+        if (!owner) continue;
+        if (owner.dev === identity.dev && owner.ino === identity.ino) break;
+        // A legacy writer uses mkdir, which has no verifiable ownership.
+        await wait();
+      }
+    }
+    try { return await currentLocks.run(new Set([...(held??[]),canonicalRoot]),work); }
+    finally { await unlink(marker); }
+  } finally { await handle.close(); }
 }
 export async function appendQueue(
   root: string,
@@ -168,10 +190,37 @@ export async function appendQueue(
     return outputPath;
   });
 }
+// Atomic protocol writes replace the inode. Legacy appends change size/mtime.
+let inspectionCache: { root:string; version:string; pending:number; entries:Map<string,ReturnType<typeof parseQueue>[number]> } | undefined;
+async function queueIndex(root: string) {
+  const file=path.join(root,"images-todo.md");
+  const handle=await open(file,"r").catch((error:NodeJS.ErrnoException)=>{
+    if(error.code!=="ENOENT")throw error;
+  });
+  if (!handle) return;
+  try {
+    const stat=await handle.stat({bigint:true});
+    const version=`${stat.dev}-${stat.ino}-${stat.size}-${stat.mtimeNs}`;
+    if(inspectionCache?.root!==root || inspectionCache.version!==version){
+      const text=await handle.readFile("utf8");
+      const parsed = parseQueue(text);
+      inspectionCache = {
+        root, version,
+        pending: parsed.reduce((n, entry) => n + Number(entry.status === "pending"), 0),
+        entries: new Map(parsed.map(entry => [entry.id, entry])),
+      };
+    }
+    return inspectionCache;
+  } finally { await handle.close(); }
+}
+
+export async function pendingQueueCount(root: string) {
+  return (await queueIndex(root))?.pending ?? 0;
+}
+
 export async function queueInspector(root: string) {
-  const snapshot = await readQueueSnapshot(root);
-  const entries = new Map(snapshot ? parseQueue(snapshot.text).map(entry => [entry.id, entry]) : []);
-  return (job: Job) => inspectQueueEntry(root, job, entries.get(job.id));
+  const index = await queueIndex(root);
+  return (job: Job) => inspectQueueEntry(root, job, index?.entries.get(job.id));
 }
 
 export async function inspectQueue(root: string, job: Job): Promise<Partial<Job>> {

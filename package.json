@@ -1,6 +1,6 @@
 {
   "name": "image-queue",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local-first image queue and generation workspace",
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3215",

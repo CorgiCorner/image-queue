@@ -206,27 +206,35 @@ export class ProjectStorage implements Storage {
     });
   }
   lock<T>(key: string, work: () => Promise<T>) { return this.workspace.lock(key, work); }
-  async putBlob(key: string, bytes: Uint8Array, mime: string) {
-    return this.coordinate ? this.coordinate(() => this.writeBlob(key, bytes, mime)) : this.writeBlob(key, bytes, mime);
+  async putBlob(key: string, bytes: Uint8Array, mime: string, projectId?: string) {
+    return this.coordinate ? this.coordinate(() => this.writeBlob(key, bytes, mime, projectId)) : this.writeBlob(key, bytes, mime, projectId);
   }
-  private async writeBlob(key: string, bytes: Uint8Array, mime: string) {
+  private async writeBlob(key: string, bytes: Uint8Array, mime: string, projectId?: string) {
     safeKey(key);
     await this.refreshProjects?.();
-    const owners = new Set<string>();
-    for (const collection of ["jobs", "references"] as const) {
-      for (const record of await this.list<{ projectId?: string; blobKey?: string; thumbnailKey?: string }>(collection)) {
-        if (record.projectId && (record.blobKey === key || record.thumbnailKey === key)) owners.add(record.projectId);
-      }
-    }
-    if (key.startsWith("thumbs/")) {
-      for (const entry of await this.entries<{ hash?: string }>("asset-meta")) {
-        if (entry.value.hash && key.startsWith(`thumbs/${entry.value.hash}/`)) {
-          const projectId = await recordProject(this, "asset-meta", entry.id, entry.value);
-          if (projectId) owners.add(projectId);
+    const targets = new Set<Storage>();
+    if(projectId){
+      // A new generation already carries its destination. Existing owners of an
+      // identical content hash have their own verified copy.
+      idSchema.parse(projectId);
+      targets.add(this.projects.get(projectId) ?? this.workspace);
+    } else {
+      const owners = new Set<string>();
+      for (const collection of ["jobs", "references"] as const) {
+        for (const record of await this.list<{ projectId?: string; blobKey?: string; thumbnailKey?: string }>(collection)) {
+          if (record.projectId && (record.blobKey === key || record.thumbnailKey === key)) owners.add(record.projectId);
         }
       }
+      if (key.startsWith("thumbs/")) {
+        for (const entry of await this.entries<{ hash?: string }>("asset-meta")) {
+          if (entry.value.hash && key.startsWith(`thumbs/${entry.value.hash}/`)) {
+            const projectId = await recordProject(this, "asset-meta", entry.id, entry.value);
+            if (projectId) owners.add(projectId);
+          }
+        }
+      }
+      for(const owner of owners)targets.add(this.projects.get(owner) ?? this.workspace);
     }
-    const targets = new Set([...owners].map(id => this.projects.get(id) ?? this.workspace));
     if (!targets.size) targets.add(this.workspace);
     const digest = await hash(bytes);
     for (const target of targets) {

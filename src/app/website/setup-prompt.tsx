@@ -7,7 +7,7 @@ import { CopyButton } from "@/components/copy-button";
 export const setupPrompt = `Set up image-queue on this Mac. Work locally, not in the cloud. If local file access and shell commands are unavailable, stop and explain what I need to enable.
 
 1. Check git, Node.js 24 or newer, pnpm 10.28.2, and the Codex CLI. Tell me what is missing before installing anything. Ask before each tool installation. Do not use sudo without explaining why and receiving my approval.
-2. Check https://github.com/corgicorner/image-queue for release v0.1.3. If that release is unavailable, stop and tell me; do not silently install main or a different version.
+2. Check https://github.com/corgicorner/image-queue for release v0.1.4. If that release is unavailable, stop and tell me; do not silently install main or a different version.
 3. Install that release into ~/image-queue. If the folder already exists, stop and ask me. Do not overwrite it.
 4. Run pnpm install --frozen-lockfile, pnpm build and pnpm build:mcp in that folder. Start with pnpm start and verify http://127.0.0.1:3215 responds. If the port is occupied, identify the process and ask me; do not stop it.
 5. Run codex login status. If I am not signed in with ChatGPT, explain the step I must complete myself. Never read authentication files, request credentials in chat, or change my existing login. Do not use an API-key login as a substitute for my ChatGPT plan.

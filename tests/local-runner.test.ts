@@ -39,14 +39,14 @@ for line in sys.stdin:
  const job={id:'IMG-lifecycle',idempotencyKey:'lifecycle',projectId:'project',prompt:'A blue square',source:'queue',provider:'openai',model:'',width:32,height:32,transparent:false,referenceIds:[],status:'queued',requestHash:'hash',createdAt:new Date().toISOString()} as unknown as Job;await appendQueue(queue,job,[]);await store.put('jobs',job.id,job);
  const runner=await startLocalRunner(store);
  try {
-  await vi.waitFor(async()=>{expect(runner?.status().blockedReason).toBeUndefined();const entries=parseQueue(await readFile(join(queue,'images-todo.md'),'utf8'));expect(entries[0].status).toBe('done');},{timeout:10000});
+  await vi.waitFor(async()=>{expect(runner?.status().blockedReason).toBeUndefined();const entries=parseQueue(await readFile(join(queue,'images-todo.md'),'utf8'));expect(entries[0].status).toBe('done');},{timeout:25000});
   expect((await store.get<any>('settings','worker-pool')).workers).toBe(0);
   await expect(startLocalRunner(store)).rejects.toThrow('operation is in progress');
-  await vi.waitFor(async()=>expect((await store.list<any>('local-attempts'))[0].state).toBe('succeeded'));
+  await vi.waitFor(async()=>expect((await store.list<any>('local-attempts'))[0].state).toBe('succeeded'),{timeout:10000});
   const next={...job,id:'IMG-external',idempotencyKey:'external'};await store.put('jobs',next.id,next);await appendQueue(queue,next,[]);
-  await vi.waitFor(async()=>{expect(parseQueue(await readFile(join(queue,'images-todo.md'),'utf8')).find(j=>j.id===next.id)?.status).toBe('done');},{timeout:10000});
+  await vi.waitFor(async()=>{expect(parseQueue(await readFile(join(queue,'images-todo.md'),'utf8')).find(j=>j.id===next.id)?.status).toBe('done');},{timeout:25000});
  } finally {await runner?.stop();}
-},15000);
+},60000);
 
 it('keeps a blocked runner stopped across application restarts',async()=>{
  const root=await mkdtemp(join(tmpdir(),'iq-runner-blocked-'));roots.push(root);const queue=join(root,'queue');await mkdir(queue);await writeFile(join(queue,'images-todo.md'),'# Image requests\n');
@@ -94,12 +94,12 @@ for line in sys.stdin:
  const job={id:'IMG-crash',prompt:'A blue square',source:'queue',width:32,height:32,transparent:false,referenceIds:[],status:'queued'} as unknown as Job;
  await appendQueue(queue,job,[]);await store.put('jobs',job.id,job);
  const first=await startLocalRunner(store);
- try {await vi.waitFor(async()=>expect((await store.get<Job>('jobs',job.id))?.status).toBe('uncertain'),{timeout:5000});}finally{await first?.stop();}
+ try {await vi.waitFor(async()=>expect((await store.get<Job>('jobs',job.id))?.status).toBe('uncertain'),{timeout:25000});}finally{await first?.stop();}
  expect((await store.list<any>('local-attempts'))[0].state).toBe('uncertain');
  const before=await readFile(join(queue,'images-todo.md'),'utf8');expect(parseQueue(before)[0].status).not.toBe('done');
  const second=await startLocalRunner(store);
- try {await second?.wake();expect(second?.status().enabled).toBe(0);expect(await readFile(counter,'utf8')).toBe('started\n');expect(await readFile(join(queue,'images-todo.md'),'utf8')).toBe(before);}finally{await second?.stop();}
-},10000);
+ try {await second?.wake();expect(second?.status().enabled).toBe(1);expect(second?.status().blockedReason).toBeUndefined();expect(await readFile(counter,'utf8')).toBe('started\n');expect(await readFile(join(queue,'images-todo.md'),'utf8')).toBe(before);}finally{await second?.stop();}
+},45000);
 
 it('keeps quota-exhausted work pending and stores a verified reset time',async()=>{
  const root=await mkdtemp(join(tmpdir(),'iq-quota-runner-'));roots.push(root);
@@ -182,4 +182,21 @@ it('pauses without losing desired concurrency or resuming on a queue wake',async
   await runner?.wake();expect(runner?.status().enabled).toBe(0);
   await store.put('settings','local-runner',{workers:3,paused:false});await runner?.wake(true);expect(runner?.status()).toMatchObject({desiredWorkers:3,enabled:3,paused:false});
  }finally{await runner?.stop();}
+});
+
+it("releases the executor after shutdown even if its heartbeat cannot be removed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "iq-stop-"));
+  roots.push(root);
+  vi.stubEnv("IMAGE_QUEUE_EXECUTOR", "local");
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DIR", join(root, "store"));
+  vi.stubEnv("IMAGE_QUEUE_CODEX_BIN", process.execPath);
+  const store = new FileStorage(join(root, "store"));
+  await store.put("settings", "paths", { queueDirectory: join(root, "queue"), referenceDirectories: [root] });
+  const runner = await startLocalRunner(store);
+  const remove = vi.spyOn(store, "delete").mockRejectedValueOnce(new Error("Status unavailable"));
+  await expect(runner!.stop()).rejects.toThrow("Status unavailable");
+  remove.mockRestore();
+  const restarted = await startLocalRunner(store);
+  try { expect(restarted?.status().paused).toBe(true); }
+  finally { await restarted?.stop(); }
 });

@@ -29,9 +29,23 @@ it('does not publish when a cancelled generator still resolves a result',async()
  x.pool.configure(1);await flush();x.pool.stop(true);x.release.get('late')!();await flush();expect(x.ports.complete).not.toHaveBeenCalled();expect(x.ports.uncertain).toHaveBeenCalledOnce();
 });
 
-it('halts the backlog after a generation failure until explicitly reconfigured',async()=>{
- const x=setup();x.ports.execute.mockRejectedValueOnce(Error('quota exhausted'));x.pool.configure(1);await flush();x.pool.wake();await flush();expect(x.ports.claim).toHaveBeenCalledTimes(1);expect(x.pool.blockedReason).toContain('paused');expect(x.queued).toHaveLength(2);x.pool.configure(1);await flush();expect(x.ports.claim).toHaveBeenCalledTimes(2);x.pool.stop(true);await flush();
+it('continues independent jobs after a failed generation',async()=>{
+ const x=setup();x.ports.execute.mockRejectedValueOnce(Error('invalid output'));x.pool.configure(1);await flush();
+ expect(x.ports.uncertain).toHaveBeenCalledOnce();expect(x.pool.blockedReason).toBeUndefined();
+ expect(x.events).toContain('execute:b');x.pool.stop(true);await flush();
 });
 it('keeps the pool blocked even when persisting an admission error fails',async()=>{
  const x=setup();x.ports.claim.mockRejectedValueOnce(Error('unavailable'));const blocked=vi.fn(async()=>{throw Error('disk full')});const pool=new LocalWorkerPool({...x.ports,blocked});pool.configure(1);await flush();expect(pool.blockedReason).toBeTruthy();expect(x.ports.report).toHaveBeenCalledTimes(2);pool.wake();await flush();expect(x.ports.claim).toHaveBeenCalledTimes(1);pool.stop();
+});
+
+it('takes later jobs after three rejected inputs and stops only when its policy requests it',async()=>{
+ const {RejectedQueueRequest}=await import('../src/core/local-worker-pool');
+ const x=setup();
+ let rejected=0;
+ const claim=vi.fn(async()=>{if(rejected<3)throw new RejectedQueueRequest(`bad-${++rejected}`,'Invalid reference');return x.queued.shift();});
+ const failed=vi.fn(async()=>undefined);
+ const pool=new LocalWorkerPool({...x.ports,claim,failed});
+ pool.configure(1);await flush();
+ expect(failed).toHaveBeenCalledTimes(3);expect(x.events).toContain('execute:a');
+ expect(pool.blockedReason).toBeUndefined();pool.stop(true);await flush();
 });

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { importExistingQueue } from "../src/core/import-queue";
-import { enqueue, refreshedJobs, retryBlockedQueueJob, retryImageJob, service } from "../src/core/runtime";
+import { executeImageJob, refreshedJobs, retryBlockedQueueJob, retryImageJob, service } from "../src/core/runtime";
 import type { Job } from "../src/core/schema";
 import { ImageService } from "../src/core/service";
 import { ProjectStorage } from "../src/storage/project-storage";
@@ -35,6 +35,7 @@ vi.mock("../src/sources/providers", () => ({
 
 import { generate } from "../src/sources/providers";
 
+const execute = async (id:string) => executeImageJob(id,await (await import("../src/storage")).storage());
 let root: string;
 let store: FileStorage;
 let api: ImageService;
@@ -84,7 +85,7 @@ describe("runtime", () => {
   });
   it("publishes queue metadata and refreshes terminal statuses", async () => {
     const job = await make();
-    await enqueue(job.id);
+    await execute(job.id);
     const saved = (await api.jobs())[0];
     expect(saved.outputPath).toContain(job.id);
     expect((await refreshedJobs())[0].status).toBe("queued");
@@ -147,7 +148,7 @@ describe("runtime", () => {
     const external = path.join(root, "external-imports");
     await mkdir(external);
     await store.put("settings", "paths", { queueDirectory, referenceDirectories: [external] });
-    await enqueue(original.id);
+    await execute(original.id);
     const queueFile = path.join(queueDirectory, "images-todo.md");
     await writeFile(queueFile, (await readFile(queueFile, "utf8")).replace("- Status: pending", "- Status: blocked: fixture"));
     await refreshedJobs();
@@ -167,7 +168,7 @@ describe("runtime", () => {
       png,
     );
     await store.put("jobs", job.id, { ...job, referenceIds: [ref.id] });
-    await enqueue(job.id);
+    await execute(job.id);
     const text = await readFile(
       path.join(process.env.CODEX_QUEUE_DIR!, "images-todo.md"),
       "utf8",
@@ -175,17 +176,17 @@ describe("runtime", () => {
     expect(text).toContain("references");
   });
   it("ignores unknown and terminal jobs", async () => {
-    await enqueue("missing");
+    await execute("missing");
     const job = await make();
     await store.put("jobs", job.id, { ...job, status: "cancelled" });
-    await enqueue(job.id);
+    await execute(job.id);
     expect((await refreshedJobs())[0].status).toBe("cancelled");
   });
   it("requires an API key and a verified model", async () => {
     const job = await make("api");
-    await expect(enqueue(job.id)).rejects.toThrow("Connect");
+    await expect(execute(job.id)).rejects.toThrow("Connect");
     process.env.OPENAI_API_KEY = "test-key";
-    await expect(enqueue(job.id)).rejects.toThrow("Refresh");
+    await expect(execute(job.id)).rejects.toThrow("Refresh");
   });
   it("persists attempts before generating and publishes results", async () => {
     const job = await make("api");
@@ -193,7 +194,7 @@ describe("runtime", () => {
     await store.put("models", "openai", [
       { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
     ]);
-    await enqueue(job.id);
+    await execute(job.id);
     const saved = await store.get<Job>("jobs", job.id);
     expect(saved?.status).toBe("done");
     expect(saved?.attemptId).toBeTruthy();
@@ -210,10 +211,10 @@ describe("runtime", () => {
       { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
     ]);
     vi.mocked(generate).mockRejectedValue(new Error("Authorization: Bearer test-key"));
-    await enqueue(job.id);
+    await execute(job.id);
     expect((await api.jobs())[0].status).toBe("uncertain");
     expect(JSON.stringify(await api.jobs())).not.toContain("test-key");
-    await enqueue(job.id);
+    await execute(job.id);
     expect(generate).toHaveBeenCalledTimes(1);
   });
   it("recovers interrupted API status without calling a provider", async () => {
@@ -271,14 +272,14 @@ it("validates reference capabilities and preserves missing-file failures", async
   await store.put("models", "openai", [
     { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
   ]);
-  await expect(enqueue(job.id)).rejects.toThrow("references");
+  await expect(execute(job.id)).rejects.toThrow("references");
   await store.put("models", "openai", [
     { id: "gpt-image-test", references: true, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
   ]);
   await store.put("jobs", job.id, { ...job, transparent: true });
-  await expect(enqueue(job.id)).rejects.toThrow("transparency");
+  await expect(execute(job.id)).rejects.toThrow("transparency");
   await store.put("jobs", job.id, { ...job, referenceIds: [ref.id] });
-  await enqueue(job.id);
+  await execute(job.id);
   expect((await api.jobs())[0].status).toBe("done");
   const another = {
     ...job,
@@ -287,13 +288,13 @@ it("validates reference capabilities and preserves missing-file failures", async
     referenceIds: ["missing"],
   };
   await store.put("jobs", another.id, another);
-  await enqueue(another.id);
-  expect((await store.get<Job>("jobs", another.id))?.status).toBe("uncertain");
+  await expect(execute(another.id)).rejects.toThrow("Reference file is missing");
+  expect((await store.get<Job>("jobs", another.id))?.attemptId).toBeUndefined();
 });
 it("fails a queue request if a reference disappears", async () => {
   const job = await make();
   await store.put("jobs", job.id, { ...job, referenceIds: ["missing"] });
-  await expect(enqueue(job.id)).rejects.toThrow("missing");
+  await expect(execute(job.id)).rejects.toThrow("missing");
 });
 it("imports legacy defaults, unknown status and in-progress rows", async () => {
   await mkdir(process.env.CODEX_QUEUE_DIR!, { recursive: true });
@@ -328,20 +329,24 @@ it("preserves a concurrent observer update and handles a busy job lock", async (
   const stores = await import("../src/storage");
   const stub = vi.spyOn(stores, "storage").mockResolvedValue(store);
   const job = await make();
-  await enqueue(job.id);
-  const lock = vi
-    .spyOn(store, "lock")
-    .mockRejectedValueOnce(
-      new Error("Another operation is in progress. Try again."),
-    );
-  expect((await refreshedJobs())[0].status).toBe("queued");
-  lock.mockRestore();
+  await execute(job.id);
+  const observer = new ImageService(store);
   const original = store.lock.bind(store);
-  vi.spyOn(store, "lock").mockImplementationOnce(async (key, work) => {
+  const lock = vi.spyOn(store, "lock");
+  expect((await refreshedJobs(observer))[0].status).toBe("queued");
+  expect(lock).not.toHaveBeenCalled();
+
+  const queueFile = path.join(process.env.CODEX_QUEUE_DIR!, "images-todo.md");
+  const beforeClaim = await readFile(queueFile, "utf8");
+  await writeFile(queueFile, beforeClaim.replace("- Status: pending", "- Status: in-progress"));
+  lock.mockRejectedValueOnce(new Error("Another operation is in progress. Try again."));
+  expect((await refreshedJobs(observer))[0].status).toBe("queued");
+  expect(lock).toHaveBeenCalledWith(job.id, expect.any(Function));
+  lock.mockImplementationOnce(async (key, work) => {
     await store.put("jobs", job.id, { ...job, status: "cancelled" });
     return original(key, work);
   });
-  expect((await refreshedJobs())[0].status).toBe("cancelled");
+  expect((await refreshedJobs(observer))[0].status).toBe("cancelled");
   vi.restoreAllMocks();
   stub.mockRestore();
 });
@@ -350,13 +355,13 @@ it("rejects cloud queue execution before touching files", async () => {
   const stub = vi.spyOn(stores, "storage").mockResolvedValue(store);
   const job = await make();
   process.env.STORAGE_DRIVER = "cloudflare";
-  await expect(enqueue(job.id)).rejects.toThrow("local companion");
+  await expect(execute(job.id)).rejects.toThrow("local companion");
   stub.mockRestore();
 });
 it("rejects API generation without a discovered model profile", async () => {
   const job = await make("api");
   process.env.OPENAI_API_KEY = "gpt-image-test";
-  await expect(enqueue(job.id)).rejects.toThrow("Refresh provider models");
+  await expect(execute(job.id)).rejects.toThrow("Refresh provider models");
 });
 it("rejects sizes unsupported by the selected provider before generation", async () => {
   const job = await make("api");
@@ -365,7 +370,7 @@ it("rejects sizes unsupported by the selected provider before generation", async
     { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
   ]);
   await store.put("jobs", job.id, { ...job, width: 4096, height: 4096 });
-  await expect(enqueue(job.id)).rejects.toThrow("No native size");
+  await expect(execute(job.id)).rejects.toThrow("No native size");
   expect(generate).not.toHaveBeenCalled();
 });
 it("preserves existing imported jobs when new queue entries arrive", async () => {
@@ -392,7 +397,7 @@ it("preserves requested dimensions when the provider returns a different size", 
   vi.mocked(generate).mockResolvedValueOnce({bytes:png,mime:"image/png",width:1000,height:960,usage:{}} as never);
   const job=await make("api");
   await store.put("models","openai",[{id:"gpt-image-test",references:false,transparency:false,sizeProfile:{mode:"fixed",sizes:[{width:1024,height:1024}]}}]);
-  await enqueue(job.id);
+  await execute(job.id);
   const saved=await store.get<Job>("jobs",job.id);
   expect(saved?.requestedSize).toEqual({width:1024,height:1024});
   expect(saved?.generatedSize).toEqual({width:1000,height:960});
@@ -416,7 +421,7 @@ it("accepts targets covered by a larger stored native model size", async () => {
     id: "gpt-image-test", references: false, transparency: false,
     sizeProfile: { mode: "fixed", sizes: [{ width: 1536, height: 1024 }] },
   }]);
-  await enqueue(job.id);
+  await execute(job.id);
   expect(generate).toHaveBeenCalled();
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.status).toBe("done");
@@ -433,7 +438,7 @@ it("accepts exact dimensions inside model limits beyond menu presets", async () 
     sizeProfile: { mode: "dimensions", minSide: 256, maxSide: 4096,
       multiple: 16, minPixels: 65536, maxPixels: 9000000, minRatio: 0.5, maxRatio: 2 },
   }]);
-  await enqueue(job.id);
+  await execute(job.id);
   expect(generate).toHaveBeenCalledWith(expect.objectContaining({ width: 1280, height: 960 }), "test-key", [], expect.any(Object));
   expect((await store.get<Job>("jobs", job.id))?.status).toBe("done");
 });
@@ -446,7 +451,7 @@ it("accepts supported proportions at exact dimensions outside presets", async ()
     id: "gpt-image-test", references: false, transparency: false,
     sizeProfile: { mode: "aspect-ratio", ratios: ["16:9"], levels: [] },
   }]);
-  await enqueue(job.id);
+  await execute(job.id);
   expect(generate).toHaveBeenCalledWith(expect.objectContaining({ width: 1280, height: 720 }), "test-key", [], expect.any(Object));
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.providerSizeParameters).toEqual({ aspectRatio: "16:9" });
@@ -459,7 +464,7 @@ it("rejects unsupported proportions before invoking a provider", async () => {
     id: "gpt-image-test", references: false, transparency: false,
     sizeProfile: { mode: "aspect-ratio", ratios: ["16:9"], levels: [] },
   }]);
-  await expect(enqueue(job.id)).rejects.toThrow("Unsupported aspect ratio");
+  await expect(execute(job.id)).rejects.toThrow("Unsupported aspect ratio");
   expect(generate).not.toHaveBeenCalled();
 });
 
@@ -471,12 +476,12 @@ it("preserves resolved size parameters when provider completion is uncertain", a
     sizeProfile: { mode: "aspect-ratio", ratios: ["1:1"], levels: [] },
   }]);
   vi.mocked(generate).mockRejectedValueOnce(new Error("connection interrupted"));
-  await enqueue(job.id);
+  await execute(job.id);
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.status).toBe("uncertain");
   expect(saved?.requestedSize).toEqual({ width: 1024, height: 1024 });
   expect(saved?.providerSizeParameters).toEqual({ aspectRatio: "1:1" });
-  await enqueue(job.id);
+  await execute(job.id);
   expect(generate).toHaveBeenCalledTimes(1);
 });
 
@@ -488,7 +493,7 @@ it("records provider dimensions separately from fitted output dimensions", async
     bytes: png, mime: "image/png", width: 1024, height: 1024,
     generatedDimensions: { width: 1536, height: 1024 }, usage: {},
   } as never);
-  await enqueue(job.id);
+  await execute(job.id);
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.providerResultSize).toEqual({ width: 1536, height: 1024 });
   expect(JSON.parse(saved!.provenance!).providerResultSize).toEqual({ width: 1536, height: 1024 });
@@ -503,12 +508,12 @@ it("retains a generated image when output fitting fails", async () => {
     bytes: png, mime: "image/png", width: 512, height: 512,
     adaptationError: "Generated image too small", usage: {},
   } as never);
-  await enqueue(job.id);
+  await execute(job.id);
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.status).toBe("blocked");
   expect(saved?.error).toBe("Generated image too small");
   expect(await store.getBlob(saved!.blobKey!)).toBeTruthy();
-  await enqueue(job.id);
+  await execute(job.id);
   expect(generate).toHaveBeenCalledTimes(1);
 });
 
@@ -549,7 +554,7 @@ it("keeps provider output dimensions separate from the fitted final image", asyn
     bytes: png, mime: "image/png", width: 1024, height: 1024,
     generatedDimensions: { width: 1536, height: 1024 }, usage: {},
   } as never);
-  await enqueue(job.id);
+  await execute(job.id);
   const saved = await store.get<Job>("jobs", job.id);
   expect(saved?.providerSize).toEqual({ width: 1536, height: 1024 });
   expect(saved?.providerResultSize).toEqual({ width: 1536, height: 1024 });
@@ -752,7 +757,7 @@ it.each([undefined, { mode: "fixed", sizes: [] }])("rejects missing or malformed
   const job = await make("api");
   process.env.OPENAI_API_KEY = "test-key";
   await store.put("models", "openai", [{ id: "gpt-image-test", references: true, transparency: true, sizeProfile }]);
-  await expect(enqueue(job.id)).rejects.toThrow("no valid size profile");
+  await expect(execute(job.id)).rejects.toThrow("no valid size profile");
   expect(generate).not.toHaveBeenCalled();
   expect(await store.get<Job>("jobs", job.id)).toMatchObject({ status: "queued" });
   expect((await store.get<Job>("jobs", job.id))?.attemptId).toBeUndefined();
@@ -761,7 +766,7 @@ it.each([undefined, { mode: "fixed", sizes: [] }])("rejects missing or malformed
 it("does not execute legacy non-OpenAI provider jobs in 0.1.0", async () => {
   const job = await make("api");
   await store.put("jobs", job.id, { ...job, provider: "google" });
-  await expect(enqueue(job.id)).rejects.toThrow("supports OpenAI only");
+  await expect(execute(job.id)).rejects.toThrow("supports OpenAI only");
   expect(generate).not.toHaveBeenCalled();
   expect((await store.get<Job>("jobs", job.id))?.attemptId).toBeUndefined();
 });
@@ -774,13 +779,13 @@ it("rejects an unverified cached model before a paid attempt", async () => {
     sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
   }]);
   process.env.OPENAI_API_KEY = "test-key";
-  await expect(enqueue(job.id)).rejects.toThrow("no valid size profile");
+  await expect(execute(job.id)).rejects.toThrow("no valid size profile");
   expect(generate).not.toHaveBeenCalled();
   expect((await store.get<Job>("jobs", job.id))?.attemptId).toBeUndefined();
 });
 
 it('requires acknowledgement to resend an uncertain queue job and preserves its original entry',async()=>{
- const original=await make();await enqueue(original.id);
+ const original=await make();await execute(original.id);
  const file=path.join(process.env.CODEX_QUEUE_DIR!,'images-todo.md');
  const reserved=(await readFile(file,'utf8')).replace('Status: pending','Status: in-progress');await writeFile(file,reserved);
  const { inspectReservedResult } = await import('../src/core/reservation-recovery');
@@ -799,7 +804,7 @@ it('requires acknowledgement to resend an uncertain queue job and preserves its 
 });
 
 it('keeps local process execution distinct from a merely reserved queue request',async()=>{
- const job=await make();await enqueue(job.id);
+ const job=await make();await execute(job.id);
  await store.put('jobs',job.id,{...(await store.get<Job>('jobs',job.id))!,status:'running',attemptId:'attempt-one',startedAt:new Date().toISOString()});
  // The queue remains authoritative for delivery; process state refines its reservation label.
  const jobs=await refreshedJobs();expect(jobs.find(j=>j.id===job.id)?.attemptId).toBe('attempt-one');

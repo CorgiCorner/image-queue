@@ -83,7 +83,8 @@ export async function tickPool(
     const activeUntil = changed
       ? input.now + config.activityWindowMinutes * 60000
       : (previous?.activeUntil ?? 0);
-    const enabled = input.slot <= config.workers;
+    const globallyPaused = (await store.get<{paused:boolean}>("settings","processing"))?.paused === true;
+    const enabled = !globallyPaused && input.slot <= config.workers;
     const interval =
       activeUntil > input.now ? config.activeMinutes : config.idleMinutes;
     const nextEligible = previous?.lastRun

@@ -52,6 +52,26 @@ class Reservations(unittest.TestCase):
     def credentials(self, claim, worker=None):
         return ["--worker", worker or claim["worker"], "--id", claim["id"], "--token", claim["token"]]
 
+    def test_upgraded_writer_recovers_only_its_own_marker_after_process_death(self):
+        self.add("IMG-first")
+        hold = ("import runpy,sys,time; from pathlib import Path; "
+                "guard=runpy.run_path(sys.argv[1])['queue_lock'](Path(sys.argv[2]),2); "
+                "guard.__enter__(); print('locked',flush=True);time.sleep(60)")
+        child = subprocess.Popen([sys.executable, "-c", hold, str(SCRIPT), str(self.root)],
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "locked")
+            self.assertTrue((self.root / ".queue.lock").samefile(self.root / ".queue.kernel"))
+            self.call("list", success=False)
+            child.kill()
+            child.wait()
+            self.assertEqual(self.call("list")[0]["id"], "IMG-first")
+            self.assertEqual(self.call("claim", "--worker", "successor")["id"], "IMG-first")
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+
     def test_parallel_claims_are_distinct_and_only_status_changes(self):
         self.add("IMG-first")
         self.add("IMG-second")

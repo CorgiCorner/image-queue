@@ -32,7 +32,9 @@ export async function importExistingQueue(store: Storage) {
     }
     // Preserve an established import destination without naming a user's project.
     const existingJobs = await store.list<Job>("jobs");
-    const existingDestination = entries.map(entry => existingJobs.find(job => job.id === entry.id && job.source === "queue")?.projectId).find(Boolean);
+    const byId=new Map(existingJobs.map(job=>[job.id,job]));
+    const destinationEntry=entries.find(entry=>byId.get(entry.id)?.source==="queue" && byId.get(entry.id)?.projectId);
+    const existingDestination=destinationEntry && byId.get(destinationEntry.id)?.projectId;
     const id = existingDestination ?? "queue-import";
     if (!(await store.get("projects", id)))
       await store.put("projects", id, {
@@ -43,6 +45,13 @@ export async function importExistingQueue(store: Storage) {
       });
     let complete = true;
     for (const entry of entries) {
+      const known=byId.get(entry.id);
+      if(known){
+        const needsDimensions=known.source==="queue" && known.status==="done" && !known.generatedSize && !known.blobKey && known.outputPath===entry.outputPath;
+        const reason=queueBlockReason(entry.status);
+        const needsReason=known.source==="queue" && known.status==="blocked" && !known.outputPath && reason && known.error!==reason;
+        if(!needsDimensions && !needsReason)continue;
+      }
       try {
         await store.lock(entry.id, async () => {
           if (await store.get("tombstones", entry.id)) return;
