@@ -5,6 +5,17 @@ import { hash, type Job } from "@/core/schema";
 import { thumbnail } from "@/sources/thumbnail";
 import { storage } from "@/storage";
 const pendingThumbnails = new Map<string, ReturnType<typeof thumbnail>>();
+const svgPolicy = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
+function imageHeaders(mime: string, cacheControl: string, extra?: Record<string, string>) {
+  return {
+    "Content-Type": mime,
+    "Cache-Control": cacheControl,
+    "X-Content-Type-Options": "nosniff",
+    ...(mime === "image/svg+xml" ? { "Content-Security-Policy": svgPolicy } : {}),
+    ...extra,
+  };
+}
 
 function renderThumbnail(bytes: Uint8Array, size: number, key: string) {
   if (configuration("STORAGE_DRIVER") === "cloudflare") return thumbnail(bytes, size);
@@ -120,17 +131,14 @@ export async function GET(request: Request) {
       }
     }
     return new Response(blob.bytes as BodyInit, {
-      headers: {
-        "Content-Type": blob.mime,
-        ...(blob.mime.startsWith("video/") ? {
+      headers: imageHeaders(
+        blob.mime,
+        params.has("thumb") ? "private, max-age=31536000, immutable" : "private, max-age=86400",
+        blob.mime.startsWith("video/") ? {
           "Accept-Ranges": "bytes",
           "Content-Length": String(blob.bytes.byteLength),
-        } : {}),
-        "Cache-Control": params.has("thumb")
-          ? "private, max-age=31536000, immutable"
-          : "private, max-age=86400",
-        "X-Content-Type-Options": "nosniff",
-      },
+        } : undefined,
+      ),
     });
   } catch {
     return new Response("Not found", { status: 404 });

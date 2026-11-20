@@ -1,11 +1,14 @@
 import { APICallError } from "ai";
+import { ImageRequestError } from "./api-rejection";
 
 export function providerFailure(error: unknown, now = Date.now()) {
-  const status = APICallError.isInstance(error) ? error.statusCode : undefined;
-  if (status === 429 && APICallError.isInstance(error)) {
-    const details = error.data as
-      | { error?: { code?: string; type?: string } }
-      | undefined;
+  // Image requests sent without the SDK report their status through ImageRequestError.
+  const direct = ImageRequestError.isInstance(error) ? error : undefined;
+  const status = APICallError.isInstance(error) ? error.statusCode : direct?.statusCode;
+  if (status === 429) {
+    const details = APICallError.isInstance(error)
+      ? (error.data as { error?: { code?: string; type?: string } } | undefined)
+      : { error: { code: direct?.providerCode, type: direct?.providerType } };
     if (
       details?.error?.code === "insufficient_quota" ||
       details?.error?.type === "insufficient_quota"
@@ -16,7 +19,7 @@ export function providerFailure(error: unknown, now = Date.now()) {
         error:
           "OpenAI rejected this request due to insufficient API credit. Check billing before resuming.",
       };
-    const header = error.responseHeaders?.["retry-after"]?.trim();
+    const header = APICallError.isInstance(error) ? error.responseHeaders?.["retry-after"]?.trim() : undefined;
     const time = !header
       ? NaN
       : /^\d+$/.test(header)

@@ -1,4 +1,6 @@
 "use client";
+import { extensionForMime, extensionForOutputFormat, referenceFormatError } from "@/core/image-format";
+import type { ImageComplexity, ImageOutputFormat, ImageQuality } from "@/core/model-profiles";
 import { isSizeMismatchError } from "@/core/job-recovery";
 import { reservationTime } from "@/core/reservation-time";
 import { customSizesStorageKey, readCustomSizes, rememberCustomSize } from "@/core/custom-sizes";
@@ -208,6 +210,10 @@ function closestCustomDimensions(width: number, ratio: string, profile?: SizePro
   }
 }
 
+const qualityLabels: Record<string, string> = { auto: "Auto quality", low: "Low quality", medium: "Medium quality", high: "High quality", xhigh: "Extra high quality", max: "Max quality" };
+const complexityLabels: Record<string, string> = { low: "Low complexity", medium: "Medium complexity", high: "High complexity" };
+const formatLabels: Record<string, string> = { png: "PNG", webp: "WebP", jpeg: "JPEG", gif: "GIF", svg: "SVG" };
+
 export function Workspace({
   initialProject = "all",
   initialJob,
@@ -348,6 +354,10 @@ export function Workspace({
     }
   }, []);
   const [variants, setVariants] = useState("1");
+  const [quality, setQuality] = useState<"" | ImageQuality>("");
+  const [complexity, setComplexity] = useState<"" | ImageComplexity>("");
+  const [outputFormat, setOutputFormat] = useState<ImageOutputFormat>("png");
+  const [frameCount, setFrameCount] = useState("9");
   const [destination, setDestination] = useState("");
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [search, setSearch] = useState("");
@@ -455,13 +465,22 @@ export function Workspace({
   const [busy, setBusy] = useState(false);
   const [pendingRecovery, setPendingRecovery] = useState<{ jobId: string; action: "retry" | "mark-failed" }>();
   const detailPendingRecovery = pendingRecovery?.jobId === detailJob?.id ? pendingRecovery?.action : undefined;
-  const [notice, setNotice] = useState("");
-  const [providerSuccess, setProviderSuccess] = useState("");
+  const [notice, setNoticeText] = useState("");
+  // Provider confirmations toast on Settings. Other notices there stay in the page banner.
+  const [noticeToast, setNoticeToast] = useState(false);
+  const setNotice = useCallback((message: string) => {
+    setNoticeToast(false);
+    setNoticeText(message);
+  }, []);
+  const showConfirmation = useCallback((message: string) => {
+    setNoticeToast(true);
+    setNoticeText(message);
+  }, []);
   // Bumps per provider whenever its key is replaced, so a connection test of the old key is dropped.
   const [keyRevisions, setKeyRevisions] = useState<Partial<Record<string, number>>>({});
   useEffect(() => {
     if (selected) setNotice("");
-  }, [selected?.id]);
+  }, [selected?.id, setNotice]);
 
   const [undoHistory, setUndoHistory] = useState<string[]>([]);
   const undoId = undoHistory.at(-1);
@@ -470,7 +489,7 @@ export function Workspace({
   const showRetentionNotice = useCallback((message: string, undoable: boolean) => {
     setNotice(message);
     setUndoNotice(undoable ? message : undefined);
-  }, []);
+  }, [setNotice]);
   const undoPending = useRef(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [dark, setDark] = useState(true);
@@ -819,6 +838,7 @@ export function Workspace({
   }, [measureFilters, queuePage, showFilterRow]);
   const [reservationReviewId,setReservationReviewId]=useState<string>();
   const health = data.localRunner ? (data.localRunner.paused ? "Workers paused" : data.localRunner.blockedReason ? "Local execution needs attention" : data.localRunner.enabled === 0 ? "Workers paused" : data.localRunner.running ? `${data.localRunner.running} generating` : "Ready for requests") : workerHealth(data.pool, data.pulses, healthNow);
+  const queueNote = (!data.localRunner && !data.pulses.length && !data.jobs.some(job => job.source === "queue")) ? "Not configured" : health;
   const stoppedJob = data.localRunner?.blockedJobId ? data.jobs.find(job => job.id === data.localRunner?.blockedJobId) : undefined;
   const workersPaused = data.processing?.paused || (data.processing?.queue.paused ?? data.localRunner?.paused ?? (data.localRunner ? data.localRunner.enabled === 0 : data.pool.workers === 0));
   const slotsWithoutHeartbeat = Array.from({ length: data.pool.workers }, (_, index) => index + 1)
@@ -842,6 +862,10 @@ export function Workspace({
     }
   }, [data.models, provider, settingsPage]);
   const models = modelsWithSizeProfiles(data.models).filter((m) => m.provider === "openai");
+  // What the sidebar says under the generation controls: the state of the source in use.
+  const generationNote = source === "queue" ? queueNote
+    : models.length ? "Billed to your OpenAI key"
+    : connectedProviders.length ? "No models loaded. Open Settings." : "No provider connected. Open Settings.";
   useEffect(() => {
     if (source !== "api") return;
     const compatible = models.filter(entry => refs.length === 0 || entry.references);
@@ -907,18 +931,58 @@ export function Workspace({
   }, [sizes, size, customDimensionsSelected, loaded, customSizesLoaded]);
   const selectedModel = models.find((item) => item.id === model);
   const correctionNeedsConnection = source === "api" && models.length === 0;
-  const correctionSourceError = source === "api"
-    ? !selectedModel ? "Connect OpenAI in Settings and choose an image model."
-      : !selectedModel.references ? "Choose a model that supports reference images."
-      : detailJob?.transparent && (!detailJob.imported || detailJob.opacityVerified) && !selectedModel.transparency
-        ? "This image has transparency. Choose a source that supports transparent images."
-      : ""
-    : "";
+  const correctionSourceError = referenceFormatError(detailJob?.outputFormat)
+    ?? (source === "api"
+      ? !selectedModel ? "Connect OpenAI in Settings and choose an image model."
+        : !selectedModel.references ? "Choose a model that supports reference images."
+        : detailJob?.transparent && (!detailJob.imported || detailJob.opacityVerified) && !selectedModel.transparency
+          ? "This image has transparency. Choose a source that supports transparent images."
+        : ""
+      : "");
   const transparencyAllowed =
     source === "queue" || selectedModel?.transparency === true;
   useEffect(() => {
     if (!transparencyAllowed) setTransparent(false);
   }, [transparencyAllowed]);
+  const qualityOptions = useMemo(
+    () => (selectedModel?.qualities ?? []).filter(value => value !== "auto"),
+    [selectedModel],
+  );
+  const complexityOptions = selectedModel?.complexities ?? [];
+  const orderedFormats = useMemo(() => {
+    const listed = selectedModel?.outputFormats ?? [];
+    const unique = listed.filter((value, index) => listed.indexOf(value) === index);
+    return unique.includes("png")
+      ? ["png" as const, ...unique.filter(value => value !== "png")]
+      : unique;
+  }, [selectedModel]);
+  const vectorFormats = orderedFormats.some(value => value === "gif" || value === "svg");
+  const formatBlocked = (value: string) => (value === "gif" || value === "svg") && (transparent || refs.length > 0);
+  useEffect(() => {
+    if (source !== "api" && Number(variants) > 4) setVariants("4");
+  }, [source, variants]);
+  useEffect(() => {
+    if (source !== "api" || !selectedModel) return;
+    if (quality && !selectedModel.qualities?.includes(quality)) setQuality("");
+    if (complexity && !selectedModel.complexities?.includes(complexity)) setComplexity("");
+    if (orderedFormats.length && !orderedFormats.includes(outputFormat))
+      setOutputFormat((orderedFormats.includes("png") ? "png" : orderedFormats[0]) as ImageOutputFormat);
+    if (formatBlocked(outputFormat)) {
+      const fallback = orderedFormats.find(value => value === "png" || value === "webp" || value === "jpeg") ?? "png";
+      setOutputFormat(fallback);
+    }
+    if (outputFormat !== "gif" && frameCount !== "9") setFrameCount("9");
+  }, [source, selectedModel, quality, complexity, outputFormat, orderedFormats, transparent, refs.length, frameCount]);
+  const formatConstraint = source !== "api" || !vectorFormats ? ""
+    : outputFormat === "gif" || outputFormat === "svg"
+      ? "Transparent background is available with PNG or WebP output."
+      : transparent && refs.length
+        ? "Transparent background requires PNG or WebP output. GIF output with reference images is not supported by this application yet. SVG output cannot be combined with reference images."
+        : transparent
+          ? "Transparent background requires PNG or WebP output."
+          : refs.length
+            ? "GIF output with reference images is not supported by this application yet. SVG output cannot be combined with reference images."
+            : "";
   const referencesById = useMemo(() => new Map(data.references.map(reference => [reference.id, reference])), [data.references]);
   const selectedRefs = refs.flatMap(id => {
     const reference = referencesById.get(id);
@@ -1036,28 +1100,50 @@ export function Workspace({
     try {
       const [width, height] = size.split("x").map(Number);
       const created: string[] = [];
-      for (let variant = 0; variant < Number(variants); variant++) {
+      const request = {
+        ...values,
+        projectId,
+        topicId: destinationTopic || undefined,
+        source,
+        provider,
+        model,
+        resolution: selectedResolution,
+        exactDimensions: selectedResolution && !customDimensionsSelected ? false : undefined,
+        aspectRatio: aspectRatios.find(value => {
+          const [ratioWidth, ratioHeight] = value.split(":").map(Number);
+          return width * ratioHeight === height * ratioWidth;
+        }),
+        width,
+        height,
+        transparent,
+        referenceIds: refs,
+      };
+      const remember = (data: { id: string; jobs?: { id: string }[] } | undefined) => {
+        if (data?.jobs?.length) created.push(...data.jobs.map(job => job.id));
+        else if (data?.id) created.push(data.id);
+      };
+      if (source === "api") {
+        const count = Number(variants);
         const result = await requestImageAction({
-          ...values,
-          projectId,
-          topicId: destinationTopic || undefined,
-          source,
-          provider,
-          model,
-          resolution: selectedResolution,
-          exactDimensions: selectedResolution && !customDimensionsSelected ? false : undefined,
-          aspectRatio: aspectRatios.find(value => {
-            const [ratioWidth, ratioHeight] = value.split(":").map(Number);
-            return width * ratioHeight === height * ratioWidth;
-          }),
-          width,
-          height,
-          transparent,
-          referenceIds: refs,
-          idempotencyKey: `${requestKey.current}-${variant}`,
+          ...request,
+          idempotencyKey: requestKey.current,
+          ...(count > 1 ? { count } : {}),
+          ...(quality ? { quality } : {}),
+          ...(complexity ? { complexity } : {}),
+          ...(outputFormat !== "png" ? { outputFormat } : {}),
+          ...(outputFormat === "gif" && frameCount !== "9" ? { frameCount: Number(frameCount) } : {}),
         });
         showError(result);
-        if (result?.data?.id) created.push(result.data.id);
+        remember(result?.data);
+      } else {
+        for (let variant = 0; variant < Number(variants); variant++) {
+          const result = await requestImageAction({
+            ...request,
+            idempotencyKey: `${requestKey.current}-${variant}`,
+          });
+          showError(result);
+          remember(result?.data);
+        }
       }
       requestKey.current = crypto.randomUUID();
       if (form.getValues("prompt") === values.prompt) form.reset();
@@ -1094,7 +1180,8 @@ export function Workspace({
     const result = await fetch(asset(job, false));
     if (!result.ok) throw new Error("Could not load image reference");
     const blob = await result.blob();
-    await upload(new File([blob], job.originalName || `${job.id}.png`, { type: blob.type }), undefined, undefined, targetProjectId);
+    const extension = blob.type ? extensionForMime(blob.type) : extensionForOutputFormat(job.outputFormat);
+    await upload(new File([blob], job.originalName || `${job.id}.${extension}`, { type: blob.type }), undefined, undefined, targetProjectId);
   }
 
   async function attachReferences(jobs: Job[], files: File[], targetProjectId: string) {
@@ -1108,6 +1195,8 @@ export function Workspace({
 
   async function receiveReferences(jobs: Job[], files: File[]) {
     if (jobs.length + files.length === 0) throw new Error("Select a completed image to add as a reference");
+    const blocked = jobs.map(job => referenceFormatError(job.outputFormat)).find(Boolean);
+    if (blocked) throw new Error(blocked);
     if (files.some(file => !["image/png", "image/jpeg", "image/webp"].includes(file.type)))
       throw new Error("References support PNG, JPEG and WebP images");
     const referenceCount = refs.length + jobs.length + files.length;
@@ -1740,11 +1829,19 @@ export function Workspace({
           }}
           className={`nav-item ${retentionDrop === view ? "bg-accent ring-1 ring-primary" : ""} ${retentionView === view && !settingsPage ? "selected" : ""}`} aria-current={retentionView === view && !settingsPage ? "page" : undefined} onClick={() => {if(settingsPage){router.push(`/?view=${view}`);return;}window.history.replaceState({}, "", `/?view=${view}`);setQueuePage(false);setRetentionView(view);setProject("all");setTopic("");setFilter("all");setSearch("");setTagFilter("");setSelectedIds([]);}}>{view === "archive" ? <Archive size={17} /> : <Trash size={17} />}<ChangingLabel value={retentionDrop === view ? (view === "archive" ? "Drop to archive" : "Drop to trash") : (view === "archive" ? "Archive" : "Trash")} /><span>{data.jobs.filter(job => view === "trash" ? job.trashedAt : job.archivedAt && !job.trashedAt).length}</span></Button>)}
         <div className="sidebar-bottom">
-          <div className="queue-health">
-            <div>
-              Codex queue
-              <span aria-live="polite" aria-atomic="true"><ChangingLabel value={data.cloud ? "Local companion required" : (!data.localRunner && !data.pulses.length && !data.jobs.some(job => job.source === "queue")) ? "Not configured" : health} /></span>
-            </div>
+          <div className="generation-status">
+            <span className="generation-status-label" id="generation-status-label">Generation</span>
+            {data.cloud
+              // The Codex queue needs a local installation, so a hosted workspace has one source.
+              ? <span className="generation-status-value">OpenAI API</span>
+              : <SelectInput label="Active generation source" className="w-full" disabled={savingSource} value={source}
+                  onValueChange={value => void changeDefaultSource(value as typeof source)}
+                  options={[{ value: "api", label: "OpenAI API" }, { value: "queue", label: "Codex queue" }]} />}
+            {source === "api" && models.length > 0 && <SelectInput label="Active image model" className="w-full" disabled={savingSource} value={model}
+              onValueChange={value => { setResolution(""); void changeDefaultSource("api", value); }}
+              placeholder="Select model"
+              options={models.map(entry => ({ value: entry.id, label: entry.name, disabled: !entry.sizeProfile }))} />}
+            <span className="generation-status-note" aria-live="polite" aria-atomic="true"><ChangingLabel value={generationNote} /></span>
           </div>
           <Button
             variant="ghost"
@@ -1844,7 +1941,7 @@ export function Workspace({
             <Tooltip label="Like image-queue? Give it a star."><a className={buttonVariants({ variant: "ghost", size: "icon-sm", className: "top-link top-link-github" })} aria-label="image-queue on GitHub" href={projectLinks.repository} target="_blank" rel="noreferrer">
               <GithubLogo size={14} />
             </a></Tooltip>
-            <Tooltip label="Let your coding agent request images and use your gallery."><Button
+            <Tooltip label={data.cloud ? "Connect Claude or another agent to request images from a chat." : "Let your coding agent request images and use your gallery."}><Button
               variant="outline"
               size="sm"
               aria-label="Connect agent"
@@ -1858,7 +1955,7 @@ export function Workspace({
           <section className="settings-page">
             <SettingsNav cloud={data.cloud} localRunner={Boolean(data.localRunner)} processing={Boolean(data.processing)} />
             <div className="settings-content">
-            {notice && <p className="settings-notice" role="status">{notice}</p>}
+            {notice && !noticeToast && <p className="settings-notice" role="status">{notice}</p>}
             <header className="settings-heading">
               <h1>Settings</h1>
               <p>Providers, workers, storage and agent connections for this workspace.</p>
@@ -1898,6 +1995,7 @@ export function Workspace({
                         label={providerOptions.find((option) => option.value === name)?.label ?? name}
                         count={data.models.filter((entry) => entry.provider === name).length}
                         revision={keyRevisions[name] ?? 0}
+                        onConfirmed={showConfirmation}
                         onDisconnect={async () => {
                           const result = await disconnectAction({ provider: name });
                           if (result.serverError) setNotice(result.serverError);
@@ -1913,7 +2011,7 @@ export function Workspace({
                 onSubmit={async (e) => {
                   e.preventDefault();
                   setProviderError("");
-                  setProviderSuccess("");
+                  if (noticeToast) setNotice("");
                   setBusy(true);
                   try {
                     const result = await connectAction({ provider, apiKey });
@@ -1924,9 +2022,9 @@ export function Workspace({
                     setData(current => ({ ...current, models: [
                       ...current.models.filter(entry => entry.provider !== provider), ...discovered,
                     ] }));
-                    setProviderSuccess("Provider connected and image models refreshed");
+                    showConfirmation("Provider connected and image models refreshed");
                     try { await refresh(); } catch {
-                      setProviderSuccess("Provider connected. Refresh the page to reload the workspace.");
+                      showConfirmation("Provider connected. Refresh the page to reload the workspace.");
                     }
                   } catch (e) {
                     setProviderError((e as Error).message);
@@ -1981,7 +2079,6 @@ export function Workspace({
                 <div className="settings-card-footer">
                   <div className="settings-footer-status">
                     <p className="provider-connection-status" role="status">{connectedProviders.includes(provider) ? "Model catalog saved" : "Not connected"}</p>
-                    {providerSuccess && <p className="provider-success" role="status">{providerSuccess}</p>}
                   </div>
                   <Button type="submit" disabled={busy}>
                     {busy && <LoaderCircle className="spin" aria-hidden="true" size={16} />}
@@ -2311,7 +2408,7 @@ export function Workspace({
                 </Button>
               </div>
             </section>
-            <AgentConnection platform={data.cloud ? undefined : data.platformSupport?.platform} launch={data.mcpLaunch} dashboardOrigin={dashboardOrigin} onNotice={setNotice} />
+            <AgentConnection remote={data.cloud} platform={data.cloud ? undefined : data.platformSupport?.platform} launch={data.mcpLaunch} dashboardOrigin={dashboardOrigin} onNotice={setNotice} />
             </div>
           </section>
         ) : (
@@ -2777,7 +2874,7 @@ export function Workspace({
                       className="compact-select"
                       value={variants}
                       onValueChange={setVariants}
-                      options={[1, 2, 3, 4].map((count) => ({
+                      options={(source === "api" ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] : [1, 2, 3, 4]).map((count) => ({
                         value: String(count),
                         label: `${count} ${count === 1 ? "image" : "images"}`,
                       }))}
@@ -2866,12 +2963,62 @@ export function Workspace({
                         label: ratioFirstLabel(value),
                       })), ...(supportsCustomSize ? [{value:"custom",label:"Custom size…"}] : [])]}
                     />
+                    {source === "api" && selectedModel && qualityOptions.length > 0 && (
+                      <SelectInput
+                        label="Quality"
+                        className="compact-select"
+                        value={quality}
+                        onValueChange={value => setQuality(value as "" | ImageQuality)}
+                        options={[
+                          { value: "", label: "Auto quality" },
+                          ...qualityOptions.map(value => ({ value, label: qualityLabels[value] ?? value })),
+                        ]}
+                      />
+                    )}
+                    {source === "api" && selectedModel && complexityOptions.length > 0 && (
+                      <SelectInput
+                        label="Complexity"
+                        className="compact-select"
+                        value={complexity}
+                        onValueChange={value => setComplexity(value as "" | ImageComplexity)}
+                        options={[
+                          { value: "", label: "Default complexity" },
+                          ...complexityOptions.map(value => ({ value, label: complexityLabels[value] ?? value })),
+                        ]}
+                      />
+                    )}
+                    {source === "api" && selectedModel && orderedFormats.length > 0 && (
+                      <SelectInput
+                        label="Format"
+                        className="compact-select"
+                        value={orderedFormats.includes(outputFormat) ? outputFormat : orderedFormats[0]}
+                        onValueChange={value => setOutputFormat(value as ImageOutputFormat)}
+                        options={orderedFormats.map(value => ({
+                          value,
+                          label: formatLabels[value] ?? value,
+                          disabled: formatBlocked(value),
+                        }))}
+                      />
+                    )}
+                    {source === "api" && outputFormat === "gif" && (
+                      <SelectInput
+                        label="Frames"
+                        className="compact-select"
+                        value={frameCount}
+                        onValueChange={setFrameCount}
+                        options={Array.from({ length: 15 }, (_, index) => {
+                          const count = String(index + 2);
+                          return { value: count, label: `${count} frames` };
+                        })}
+                      />
+                    )}
                     <div className="alpha-option">
                       <Checkbox
                         id="transparent-background"
                         aria-label="Transparent"
                         checked={transparent}
-                        disabled={!transparencyAllowed}
+                        disabled={!transparencyAllowed || (source === "api" && (outputFormat === "gif" || outputFormat === "svg"))}
+                        aria-describedby={formatConstraint ? "format-constraint" : undefined}
                         onCheckedChange={setTransparent}
                       />
                       <Label htmlFor="transparent-background">
@@ -2902,14 +3049,15 @@ export function Workspace({
                   </Button>
                 </div>
               </form>
-              {source === "api" && model && !sizes.length && <p className="field-error" role="status">{unavailableSizeMessage}</p>}
-              {source === "api" && sizeFallback?.after === size && (
-                <p className="text-muted-foreground" role="status">
-                  This model does not support {ratioFirstLabel(sizeFallback.before)}. Using {ratioFirstLabel(size)}.
-                </p>
-              )}
-              {sizeAdaptation && <p className="text-muted-foreground" role="status">{sizeAdaptation}</p>}
               <div className="composer-hint">
+                {source === "api" && model && !sizes.length && <p className="field-error" role="status">{unavailableSizeMessage}</p>}
+                {source === "api" && sizeFallback?.after === size && (
+                  <p className="text-muted-foreground" role="status">
+                    This model does not support {ratioFirstLabel(sizeFallback.before)}. Using {ratioFirstLabel(size)}.
+                  </p>
+                )}
+                {sizeAdaptation && <p className="text-muted-foreground" role="status">{sizeAdaptation}</p>}
+                {formatConstraint && <p id="format-constraint" className="text-muted-foreground" role="status">{formatConstraint}</p>}
                 {(source === "queue" ? queueRequestsNotice : apiNotice) && <span className="mobile-processing-status" role="status">{source === "api" ? "API processing unavailable · requests will wait" : workersPaused ? "Queue paused · requests will wait" : "Queue unavailable · requests will wait"}</span>}
                 <span className="composer-attribution">
                   {source === "queue"
@@ -2933,7 +3081,7 @@ export function Workspace({
       </main>
       <FirstGenerationCelebration jobs={data.jobs} loaded={loaded} blocked={Boolean(settings || newProject || selected || library)} />
       {notice &&
-        !(settings || newProject || selected || library) && (
+        !(newProject || selected || library || (settings && !noticeToast)) && (
           <Notification message={notice} onDismiss={() => setNotice("")}
             action={notice === "Connect this provider in Settings first"
               ? <a href="/settings#provider-connection" className={buttonVariants({ variant: "outline", size: "sm" })}>Open settings</a>
@@ -3194,7 +3342,7 @@ export function Workspace({
                   </div>
                   <ExpandablePrompt expanded={promptExpanded} text={detailJob.imported && !detailJob.prompt ? "Imported, no prompt" : detailJob.prompt} />
                   <p className="detail-metadata">{detailJob.imported ? "Imported" : detailJob.source === "queue" ? "Codex queue" : providerLabels[detailJob.provider]}{!detailJob.imported && detailJob.model && ` · ${detailJob.model}`}</p>
-                  <p className="detail-metadata">{detailJob.width} × {detailJob.height}{(!detailJob.imported || detailJob.opacityVerified) && <> · {detailJob.transparent ? "Transparent" : "Opaque"}</>} · {new Date(detailJob.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
+                  <p className="detail-metadata">{detailJob.width} × {detailJob.height}{(!detailJob.imported || detailJob.opacityVerified) && <> · {detailJob.transparent ? "Transparent" : "Opaque"}</>}{(detailJob.outputFormat || (detailJob.source === "api" && !detailJob.imported)) && ` · ${formatLabels[detailJob.outputFormat ?? "png"] ?? "PNG"}`}{detailJob.quality && ` · ${qualityLabels[detailJob.quality] ?? detailJob.quality}`}{detailJob.complexity && ` · ${complexityLabels[detailJob.complexity] ?? detailJob.complexity}`} · {new Date(detailJob.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
                   {detailJob.exactDimensions === false && detailJob.aspectRatio &&
                     <p className="detail-metadata">Requested aspect ratio · {detailJob.aspectRatio}</p>}
                   {detailJob.resolution &&
@@ -3293,6 +3441,8 @@ export function Workspace({
                   {detailJob.status === "done" && (
                     <Button
                       variant="outline"
+                      disabled={Boolean(referenceFormatError(detailJob.outputFormat))}
+                      aria-describedby={referenceFormatError(detailJob.outputFormat) ? "reference-format-reason" : undefined}
                       onClick={async () => {
                         try {
                           await receiveReferences([detailJob], []);
@@ -3306,6 +3456,7 @@ export function Workspace({
                       <ImageIcon size={15} /> Use as reference
                     </Button>
                   )}
+                  {referenceFormatError(detailJob.outputFormat) && <span id="reference-format-reason" className="sr-only">{referenceFormatError(detailJob.outputFormat)}</span>}
                   {(detailJob.status === "done" || (detailJob.status === "blocked" && detailJob.blobKey)) && (
                     <Tooltip label="Download"><Button
                       variant="outline"
@@ -3314,7 +3465,7 @@ export function Workspace({
                       onClick={() => {
                         const a = document.createElement("a");
                         a.href = asset(detailJob, false);
-                        a.download = `${detailJob.id}.png`;
+                        a.download = `${detailJob.id}.${extensionForOutputFormat(detailJob.outputFormat)}`;
                         a.click();
                       }}
                     >
@@ -3346,6 +3497,10 @@ export function Workspace({
                       form.setValue("prompt", detailJob.prompt);
                       setSize(`${detailJob.width}x${detailJob.height}`);
                       setTransparent(detailJob.transparent);
+                      setQuality(detailJob.quality && detailJob.quality !== "auto" ? detailJob.quality : "");
+                      setComplexity(detailJob.complexity ?? "");
+                      setOutputFormat(detailJob.outputFormat ?? "png");
+                      setFrameCount(detailJob.frameCount ? String(detailJob.frameCount) : "9");
                       setDestination(detailJob.projectId);
                       setDestinationTopic(detailJob.topicId ?? "");
                       setSource(detailJob.source);
@@ -3438,6 +3593,10 @@ export function Workspace({
                     setDestinationTopic(detailJob.topicId ?? "");
                     setSource(detailJob.source);setProvider(detailJob.provider);setModel(detailJob.model);
                     setSize(`${detailJob.width}x${detailJob.height}`);setTransparent(detailJob.transparent);
+                    setQuality(detailJob.quality && detailJob.quality !== "auto" ? detailJob.quality : "");
+                    setComplexity(detailJob.complexity ?? "");
+                    setOutputFormat(detailJob.outputFormat ?? "png");
+                    setFrameCount(detailJob.frameCount ? String(detailJob.frameCount) : "9");
                     setCustomDimensionsSelected(detailJob.exactDimensions !== false);setResolution(detailJob.resolution ?? "");
                     setRefs(detailJob.referenceIds.filter(id=>data.references.some(ref=>ref.id===id)));
                     requestKey.current=crypto.randomUUID();setComposerCollapsed(false);setComposerExpanded(true);setSelected(null);

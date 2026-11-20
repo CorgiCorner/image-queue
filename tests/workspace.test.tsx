@@ -111,6 +111,7 @@ import {
   createTopicAction,
   processingAction,
   poolConfigAction,
+  generationSourceAction,
   requestImageAction,
   moveJobAction,
   cancelAction,
@@ -535,6 +536,8 @@ describe("workspace edge cases and interactions", () => {
     );
     const error = await screen.findByRole("alert");
     expect(error.textContent).toBe("Invalid key");
+    expect(error.classList.contains("field-error")).toBe(true);
+    expect(document.querySelector(".toast")).toBeNull();
     const key = screen.getByLabelText("API key");
     expect(key.getAttribute("aria-describedby")).toBe(error.id);
     expect(key.getAttribute("aria-invalid")).toBe("true");
@@ -555,7 +558,11 @@ describe("workspace edge cases and interactions", () => {
         (screen.getByLabelText("Generation source") as HTMLSelectElement).value,
       ).toBe("api"),
     );
-    expect(screen.getByText("Local companion required")).toBeTruthy();
+    // The sidebar names the source in use instead of a Codex queue that cannot run there.
+    const status = document.querySelector(".generation-status")!;
+    expect(status.textContent).toContain("OpenAI API");
+    expect(screen.queryByText("Local companion required")).toBeNull();
+    expect(screen.queryByLabelText("Active generation source")).toBeNull();
   });
 });
 
@@ -578,6 +585,30 @@ it("cancels a queued request and reports cancellation failures", async () => {
   } as never);
   fireEvent.click(screen.getByRole("button", { name: "Cancel request" }));
   await screen.findByText("Already claimed");
+});
+it("disables using a GIF or SVG result as a reference", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ ...structuredClone(state), jobs: [{ ...state.jobs[0], outputFormat: "gif", source: "api" }] }),
+  })));
+  render(<Workspace />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open IMG-first" }));
+  expect(screen.getByRole("button", { name: "Use as reference" })).toHaveProperty("disabled", true);
+  expect(document.getElementById("reference-format-reason")?.textContent).toBe("GIF and SVG results cannot be used as references.");
+});
+it("downloads a WebP result with a matching file extension", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ ...structuredClone(state), jobs: [{ ...state.jobs[0], outputFormat: "webp", source: "api" }] }),
+  })));
+  const names: string[] = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    names.push(this.download);
+  });
+  render(<Workspace />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open IMG-first" }));
+  fireEvent.click(screen.getByRole("button", { name: "Download" }));
+  expect(names).toEqual(["IMG-first.webp"]);
 });
 it("downloads and reuses a generated image as a reference", async () => {
   vi.stubGlobal(
@@ -727,9 +758,25 @@ it("tests a connected provider beside its disconnect action", async () => {
   const test = screen.getByRole("button", { name: "Test connection" });
   expect(test.parentElement).toBe(screen.getByRole("button", { name: "Disconnect" }).parentElement);
   fireEvent.click(test);
-  await screen.findByText("Connection works. 3 image models available.");
+  const confirmation = await screen.findByText("Connection works. 3 image models available.");
+  expect(confirmation.closest(".toast")).toBeTruthy();
+  expect(document.querySelector(".settings-notice")).toBeNull();
+  expect(test.closest("li")?.querySelector(".settings-list-meta")?.textContent).toBe("1 model");
   expect(testConnectionAction).toHaveBeenCalledWith({ provider: "openai" });
   expect(disconnectAction).not.toHaveBeenCalled();
+});
+it("keeps a failed connection test beside the provider", async () => {
+  const { testConnectionAction } = await import("../src/actions");
+  vi.mocked(testConnectionAction).mockResolvedValueOnce({
+    serverError: "The provider rejected this API key (401). Check the key and try again.",
+  } as never);
+  render(<Workspace settingsPage />);
+  await screen.findByLabelText("API key");
+  fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+  const error = await screen.findByText("The provider rejected this API key (401). Check the key and try again.");
+  expect(error.closest(".settings-list-meta")).toBeTruthy();
+  expect(error.closest(".toast")).toBeNull();
+  expect(document.querySelector(".settings-notice")).toBeNull();
 });
 it("copies an output path and focuses the prompt", async () => {
   Object.defineProperty(navigator, "clipboard", {
@@ -782,7 +829,9 @@ it("handles settings navigation and provider disconnect errors", async () => {
   render(<Workspace settingsPage />);
   await screen.findByLabelText("API key");
   fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-  await screen.findByText("Cannot disconnect");
+  const failure = await screen.findByText("Cannot disconnect");
+  expect(failure.classList.contains("settings-notice")).toBe(true);
+  expect(document.querySelector(".toast")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /^All images/ }));
   fireEvent.click(screen.getByRole("button", { name: /^Queue/ }));
   fireEvent.click(screen.getByRole("button", { name: "New project" }));
@@ -1514,7 +1563,8 @@ it("keeps custom size open when dimensions violate the model profile", async () 
   fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "api" } });
   fireEvent.change(screen.getByLabelText("Image model"), { target: { value: "gpt-image-test" } });
   fireEvent.change(screen.getByLabelText("Image size"), { target: { value: "custom" } });
-  fireEvent.change(screen.getByLabelText("Width"), { target: { value: "1025" } });
+  // Off-grid sizes are now fitted down from a covering native size; exceeding maxSide is still refused.
+  fireEvent.change(screen.getByLabelText("Width"), { target: { value: "2064" } });
   fireEvent.change(screen.getByLabelText("Height"), { target: { value: "1024" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply size" }));
   expect(screen.getByRole("alert").textContent).toContain("model's limits");
@@ -2188,16 +2238,18 @@ it("updates the same polite live region after workers are paused", async () => {
     ok: true,
     json: async () => ({
       ...structuredClone(state),
+      // The sidebar reports the source in use, so the queue must be it.
+      generationSource: { source: "queue" },
       pool: { ...state.pool, workers: vi.mocked(poolConfigAction).mock.calls.length ? 0 : 4 },
     }),
   })));
-  const { container } = render(<Workspace settingsPage />);
-  const region = container.querySelector('.queue-health [aria-live="polite"]');
-  expect(region?.textContent).toBe("Not configured");
+  const { container } = render(<Workspace settingsPage initialState={{ ...structuredClone(state), generationSource: { source: "queue" } } as never} />);
+  const region = container.querySelector('.generation-status [aria-live="polite"]');
+  expect(region?.textContent).toBe("Workers not responding");
   fireEvent.change(await screen.findByLabelText("Active workers"), { target: { value: "0" } });
   fireEvent.click(screen.getByRole("button", { name: "Save worker settings" }));
   await waitFor(() => expect(region?.textContent).toBe("Workers paused"));
-  expect(container.querySelector('.queue-health [aria-live="polite"]')).toBe(region);
+  expect(container.querySelector('.generation-status [aria-live="polite"]')).toBe(region);
 });
 
 it("shows a disabled worker finishing its existing reservation", async () => {
@@ -2719,8 +2771,24 @@ it("hides discovered models without usable size profiles from the composer", asy
   }) })));
   await ready();
   fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "api" } });
-  expect(screen.getByRole("option", { name: "Image test" })).toBeTruthy();
+  // The composer and the sidebar both list models; neither offers one without a size profile.
+  expect(screen.getAllByRole("option", { name: "Image test" }).length).toBe(2);
   expect(screen.queryByRole("option", { name: "Unprofiled model" })).toBeNull();
+});
+
+it("shows and switches the generation source and model in the sidebar", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ...structuredClone(state), generationSource: { source: "queue" } }) })));
+  render(<Workspace initialState={{ ...structuredClone(state), generationSource: { source: "queue" } } as never} />);
+  const status = document.querySelector(".generation-status")!;
+  const sourceSelect = screen.getByLabelText("Active generation source") as HTMLSelectElement;
+  expect(sourceSelect.value).toBe("queue");
+  expect(screen.queryByLabelText("Active image model")).toBeNull();
+  fireEvent.change(sourceSelect, { target: { value: "api" } });
+  await waitFor(() => expect(generationSourceAction).toHaveBeenCalledWith(expect.objectContaining({ source: "api" })));
+  // The composer follows the same setting, and the model becomes switchable beside it.
+  expect((screen.getByLabelText("Generation source") as HTMLSelectElement).value).toBe("api");
+  expect(await screen.findByLabelText("Active image model")).toBeTruthy();
+  await waitFor(() => expect(status.textContent).toContain("Billed to your OpenAI key"));
 });
 
 
@@ -2730,10 +2798,24 @@ it("updates the provider state from the saved catalog and shows success without 
   fireEvent.change(screen.getByLabelText("API key"), { target: { value: "fixture-key-value" } });
   fireEvent.click(screen.getByRole("button", { name: "Connect & load models" }));
   const success = await screen.findByText("Provider connected and image models refreshed");
-  expect(success.classList.contains("provider-success")).toBe(true);
+  expect(success.closest(".toast")).toBeTruthy();
   expect(success.classList.contains("field-error")).toBe(false);
+  expect(document.querySelector(".provider-success")).toBeNull();
+  expect(document.querySelector(".settings-notice")).toBeNull();
   expect(screen.getByRole("button", { name: "Update key & refresh models" })).toBeTruthy();
   expect(screen.getByText("Model catalog saved", { exact: true })).toBeTruthy();
+});
+
+it("toasts when the provider connects but the workspace cannot refresh", async () => {
+  vi.mocked(connectAction).mockResolvedValueOnce({ data: state.models } as never);
+  vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+  render(<Workspace settingsPage initialState={{ ...state, models: [] } as never} />);
+  fireEvent.change(screen.getByLabelText("API key"), { target: { value: "fixture-key-value" } });
+  fireEvent.click(screen.getByRole("button", { name: "Connect & load models" }));
+  const success = await screen.findByText("Provider connected. Refresh the page to reload the workspace.");
+  expect(success.closest(".toast")).toBeTruthy();
+  expect(document.querySelector(".settings-notice")).toBeNull();
+  expect(screen.queryByText("Provider connected and image models refreshed")).toBeNull();
 });
 
 it("distinguishes a connected provider without a size profile from a missing connection", async () => {
@@ -3023,6 +3105,9 @@ it("saves the default source in Settings without submitting or resuming work", a
   render(<Workspace initialState={state as never} settingsPage />);
   fireEvent.change(screen.getByRole('combobox', {name:'Default generation source'}), {target:{value:'api'}});
   await waitFor(() => expect(generationSourceAction).toHaveBeenCalledWith({source:'api',provider:'openai'}));
+  const saved = await screen.findByText("Default source saved. Existing requests keep their source.");
+  expect(saved.classList.contains("settings-notice")).toBe(true);
+  expect(document.querySelector(".toast")).toBeNull();
   await waitFor(() => expect((screen.getByRole('combobox', {name:'Default generation source'}) as HTMLSelectElement).value).toBe('api'));
   expect(requestImageAction).not.toHaveBeenCalled();
   expect(pauseLocalRunnerAction).not.toHaveBeenCalled();
@@ -3035,6 +3120,110 @@ it("restores the composer source when saving its default fails", async () => {
   fireEvent.change(screen.getByRole('combobox', {name:'Generation source'}), {target:{value:'api'}});
   await waitFor(() => expect(screen.getByText('Could not save source')).toBeDefined());
   expect((screen.getByRole('combobox', {name:'Generation source'}) as HTMLSelectElement).value).toBe('queue');
+});
+
+const capableModels = [
+  {
+    id: "gpt-image-2.6-sunburst", name: "Sunburst", provider: "openai", transparency: true, references: true,
+    sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
+    qualities: ["low", "medium", "high", "xhigh", "auto"],
+    complexities: ["low", "medium", "high"],
+    outputFormats: ["png", "webp", "jpeg", "gif", "svg"],
+  },
+  {
+    id: "gpt-image-1-mini", name: "Mini", provider: "openai", transparency: true, references: true,
+    sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
+    qualities: ["low", "medium"], complexities: [], outputFormats: ["png", "webp"],
+  },
+];
+
+it("offers API quality, complexity, format and count, and blocks conflicting formats", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ ...structuredClone(state), models: capableModels, references: [
+      { id: "ref", projectId: "project", name: "panda.png", kind: "image" },
+    ] }),
+  })));
+  render(<Workspace />);
+  await screen.findByRole("button", { name: "Open IMG-first" });
+  expect(screen.queryByLabelText("Quality")).toBeNull();
+  expect(screen.queryByLabelText("Format")).toBeNull();
+  expect(screen.getByLabelText("Image variants").querySelectorAll("option")).toHaveLength(4);
+  fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "api" } });
+  await waitFor(() => expect(screen.getByLabelText("Quality")).toBeTruthy());
+  expect(screen.getByLabelText("Image variants").querySelectorAll("option")).toHaveLength(10);
+  const quality = screen.getByLabelText("Quality");
+  expect(quality.querySelectorAll("option").length).toBe(5);
+  expect([...quality.querySelectorAll("option")].map(option => option.textContent)).toEqual(["Auto quality", "Low quality", "Medium quality", "High quality", "Extra high quality"]);
+  expect([...screen.getByLabelText("Complexity").querySelectorAll("option")].map(option => option.textContent)).toEqual(["Default complexity", "Low complexity", "Medium complexity", "High complexity"]);
+  const formatOption = (name: string) => screen.getByLabelText("Format").querySelector(`option[value="${name}"]`) as HTMLOptionElement;
+  fireEvent.click(screen.getByRole("checkbox", { name: "Transparent" }));
+  expect(formatOption("gif").disabled).toBe(true);
+  expect(formatOption("svg").disabled).toBe(true);
+  expect(screen.getByText("Transparent background requires PNG or WebP output.")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Format"), { target: { value: "gif" } });
+  await waitFor(() => expect(screen.getByLabelText("Format")).toHaveProperty("value", "png"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Transparent" }));
+  fireEvent.click(screen.getByRole("button", { name: "Attach image reference" }));
+  fireEvent.click(await screen.findByRole("button", { name: "panda.png" }));
+  expect(formatOption("gif").disabled).toBe(true);
+  expect(screen.getByText(/GIF output with reference images is not supported/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "panda.png" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  fireEvent.change(screen.getByLabelText("Quality"), { target: { value: "xhigh" } });
+  fireEvent.change(screen.getByLabelText("Complexity"), { target: { value: "low" } });
+  fireEvent.change(screen.getByLabelText("Format"), { target: { value: "gif" } });
+  expect(screen.getByLabelText("Format")).toHaveProperty("value", "gif");
+  expect(screen.getByRole("checkbox", { name: "Transparent" }).hasAttribute("data-disabled")).toBe(true);
+  expect(screen.getByText("Transparent background is available with PNG or WebP output.")).toBeTruthy();
+  expect(document.getElementById("format-constraint")?.closest(".composer-hint")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Frames"), { target: { value: "4" } });
+  fireEvent.change(screen.getByLabelText("Image variants"), { target: { value: "2" } });
+  fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "queue" } });
+  await waitFor(() => expect(screen.queryByLabelText("Format")).toBeNull());
+  expect(screen.getByRole("checkbox", { name: "Transparent" }).hasAttribute("data-disabled")).toBe(false);
+  fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "api" } });
+  await waitFor(() => expect(screen.getByLabelText("Format")).toHaveProperty("value", "gif"));
+  fireEvent.change(screen.getByLabelText("Image model"), { target: { value: "gpt-image-1-mini" } });
+  await waitFor(() => expect(screen.getByLabelText("Quality")).toHaveProperty("value", ""));
+  expect(screen.queryByLabelText("Complexity")).toBeNull();
+  expect(screen.queryByLabelText("Frames")).toBeNull();
+  expect(screen.getByLabelText("Format")).toHaveProperty("value", "png");
+  fireEvent.change(screen.getByLabelText("Quality"), { target: { value: "medium" } });
+  fireEvent.change(screen.getByLabelText("Format"), { target: { value: "webp" } });
+  fireEvent.change(screen.getByLabelText("Image prompt"), { target: { value: "A painted panda" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate image" }));
+  await waitFor(() => expect(requestImageAction).toHaveBeenCalledTimes(1));
+  const payload = vi.mocked(requestImageAction).mock.calls[0][0];
+  expect(payload).toMatchObject({ source: "api", quality: "medium", outputFormat: "webp", count: 2 });
+  expect(payload).not.toHaveProperty("complexity");
+  expect(payload).not.toHaveProperty("frameCount");
+  expect(payload).not.toHaveProperty("frameDurationMs");
+  fireEvent.change(screen.getByLabelText("Generation source"), { target: { value: "queue" } });
+  await waitFor(() => expect(screen.queryByLabelText("Quality")).toBeNull());
+  expect(screen.queryByLabelText("Format")).toBeNull();
+});
+
+it("shows stored format settings and restores them from the detail view", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      ...structuredClone(state),
+      models: capableModels,
+      jobs: [{ ...state.jobs[0], source: "api", model: "gpt-image-2.6-sunburst", outputFormat: "webp", quality: "high", complexity: "low" }],
+    }),
+  })));
+  render(<Workspace />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open IMG-first" }));
+  const metadata = [...document.querySelectorAll(".detail-metadata")].map(node => node.textContent).join(" ");
+  expect(metadata).toMatch(/WebP/);
+  expect(metadata).toMatch(/High quality/);
+  expect(metadata).toMatch(/Low complexity/);
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Reuse prompt" }));
+  await waitFor(() => expect(screen.getByLabelText("Format")).toHaveProperty("value", "webp"));
+  expect(screen.getByLabelText("Quality")).toHaveProperty("value", "high");
+  expect(screen.getByLabelText("Complexity")).toHaveProperty("value", "low");
 });
 
 it("links the processing panel and saves a source pause independently of provider access", async () => {

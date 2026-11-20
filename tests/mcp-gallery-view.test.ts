@@ -16,6 +16,10 @@ vi.mock("../src/mcp/views/compact-app", () => ({
   applyDocumentTheme: vi.fn(), applyHostStyleVariables: vi.fn(),
 }));
 afterEach(() => { document.body.innerHTML = ""; vi.unstubAllGlobals(); });
+// A preview asks the app-only tool first, so the resource fallback starts a few microtasks later.
+async function settle() {
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+}
 async function open(withViewport = false) {
   vi.resetModules();
   document.body.innerHTML = '<button id="display-mode" hidden>Full screen</button><p role="status"></p><div id="gallery"></div><button id="more" hidden>Load more</button>';
@@ -167,12 +171,42 @@ it("offers only host-supported display modes and follows the confirmed mode", as
   expect(button.textContent).toBe("Full screen");
 });
 
+it("loads card previews through the app-only tool without reading the resource", async () => {
+  const app = await open();
+  app.callServerTool.mockResolvedValue({ content: [{ type: "image", mimeType: "image/webp", data: "dG9vbA==" }] });
+  app.ontoolresult(result([{ id: "one", title: "One", status: "done" }, { id: "two", title: "Two", status: "queued" }]));
+  await settle();
+  expect(app.callServerTool.mock.calls).toEqual([[{ name: "read_thumbnail", arguments: { id: "one" } }]]);
+  expect(document.querySelector<HTMLImageElement>('[data-image-id="one"] img')!.src).toBe("data:image/webp;base64,dG9vbA==");
+  expect(app.readServerResource).not.toHaveBeenCalled();
+  await app.onteardown();
+});
+
+it("falls back to the thumbnail resource and marks a card when both sources fail", async () => {
+  const app = await open();
+  app.callServerTool.mockResolvedValue({ isError: true, content: [{ type: "text", text: "Image is unavailable" }] });
+  app.readServerResource.mockImplementation(async ({ uri }: { uri: string }) => {
+    if (uri.endsWith("/two")) throw new Error("Resource unavailable");
+    return { contents: [{ mimeType: "image/webp", blob: "cmVzb3VyY2U=" }] };
+  });
+  app.ontoolresult(result([{ id: "one", title: "One", status: "done" }, { id: "two", title: "Two", status: "done" }]));
+  await settle();
+  const first = document.querySelector<HTMLImageElement>('[data-image-id="one"] img')!;
+  const second = document.querySelector<HTMLImageElement>('[data-image-id="two"] img')!;
+  expect(first.src).toBe("data:image/webp;base64,cmVzb3VyY2U=");
+  expect(first.alt).toBe("One");
+  expect(second.hasAttribute("src")).toBe(false);
+  expect(second.alt).toBe("Two — preview unavailable");
+  await app.onteardown();
+});
+
 it("ignores a thumbnail delivered after the gallery was replaced", async () => {
   const app = await open();
   let finish!: (value: unknown) => void;
   app.readServerResource.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   app.ontoolresult(result([{ id: "old", title: "Old", status: "done" }]));
   const oldImage = document.querySelector<HTMLImageElement>("#gallery img")!;
+  await settle();
   app.ontoolresult(result([{ id: "new", title: "New", status: "queued" }]));
   finish({ contents: [{ mimeType: "image/png", blob: "YWJj" }] });
   await Promise.resolve();
@@ -186,6 +220,7 @@ it("ignores a thumbnail failure after teardown", async () => {
   app.readServerResource.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
   app.ontoolresult(result([{ id: "one", title: "One", status: "done" }]));
   const image = document.querySelector<HTMLImageElement>("#gallery img")!;
+  await settle();
   await app.onteardown();
   fail(new Error("Disconnected"));
   await Promise.resolve();
@@ -273,8 +308,8 @@ it.each([false, true])("windows cards and reloads evicted previews (over budget:
   app.readServerResource.mockResolvedValue({ contents: [{ blob, mimeType: "image/png" }] });
   app.ontoolresult(result(Array.from({ length: 100 }, (_, i) => ({ id: `image-${i}`, title: `Image ${i}`, status: "done" }))));
   expect(grid.querySelectorAll("label").length).toBeLessThan(15);
+  await settle();
   expect(app.readServerResource.mock.calls.length).toBeLessThan(15);
-  await Promise.resolve();
   const first = grid.querySelector<HTMLInputElement>("input")!;
   first.checked = true;
   first.dispatchEvent(new Event("change"));
@@ -369,6 +404,7 @@ it("reuses a pending thumbnail read when a card returns to the viewport", async 
   app.ontoolresult(result(Array.from({ length: 100 }, (_, i) => ({
     id: `image-${i}`, title: `Image ${i}`, status: "done",
   }))));
+  await settle();
   top = -3000;
   window.dispatchEvent(new Event("scroll"));
   expect(grid.querySelector('[data-image-id="image-0"]')).toBeNull();

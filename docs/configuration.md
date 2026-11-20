@@ -26,7 +26,7 @@ Open http://127.0.0.1:3215. Connections and worker settings are at `/settings`. 
 
 Environment keys use `IMAGE_QUEUE_OPENAI_API_KEY`, `IMAGE_QUEUE_GOOGLE_GENERATIVE_AI_API_KEY`, `IMAGE_QUEUE_AI_GATEWAY_API_KEY` and `IMAGE_QUEUE_OPENROUTER_API_KEY`. Legacy unprefixed configuration remains readable. Keep local configuration and credentials out of version control and synchronization.
 
-Provider discovery confirms access to a model, but does not establish its supported dimensions. The composer and MCP `list_models` expose only models with a structurally valid stored size profile. Execution rejects a missing or invalid profile before starting a paid attempt. The release still requires live provider verification and a maintained registry of those verified profiles; connecting a new key alone currently does not create that evidence. See [model verification](model-profiles.md).
+Provider discovery confirms access to a model, but does not establish its supported dimensions. The composer and MCP `list_models` expose only models with a structurally valid stored size profile. Execution rejects a missing or invalid profile before starting a paid attempt. Profiles come from a maintained registry backed by live verification receipts; capabilities taken only from provider documentation are listed as `documentedOnly`. Connecting a new key alone does not create a profile. See [model verification](model-profiles.md).
 
 
 The default queue directory is `./image-queue`. Configure `IMAGE_QUEUE_QUEUE_DIR` to attach an existing queue. The panel imports metadata, reads existing artwork and appends new requests using the shared `.queue.lock`. Project assignment stays in panel storage. Submitted queue entries remain worker-owned. No worker is created by this application.
@@ -98,19 +98,33 @@ To order an image over stdio, use the ID returned by `create_project` or `list_p
 
 For an exact output size, provide `width` and `height` in pixels. Pass the request's returned `id` to `get_job` to read its status and, when done, its local `outputPath`.
 
-HTTP MCP uses `/api/mcp` and requires `Authorization: Bearer <IMAGE_QUEUE_MCP_TOKEN>`. It is disabled until that secret is configured. A local HTTP client must send the returned `Mcp-Session-Id` on subsequent requests to retain negotiated MCP Apps capabilities. Sessions expire after 30 minutes of inactivity. The Cloudflare HTTP endpoint is stateless and exposes the base MCP tools.
+HTTP MCP uses `/api/mcp` and requires `Authorization: Bearer <IMAGE_QUEUE_MCP_TOKEN>`. It is disabled until that secret is configured. A local HTTP client must send the returned `Mcp-Session-Id` on subsequent requests to retain negotiated MCP Apps capabilities. Sessions expire after 30 minutes of inactivity. A Cloudflare deployment authenticates MCP through Cloudflare Access instead; see below.
 
-API generation records the attempt before contacting a provider and disables SDK retries. Interrupted or ambiguous failures become `uncertain`. Check the provider before submitting another job. A new job is an explicit new request and can incur a new charge.
+API generation records the attempt before contacting a provider and disables SDK retries. A definite provider rejection, such as invalid input or no remaining credits, is stored as `failed` with the provider's reason and did not generate an image; interrupted or ambiguous failures stay `uncertain` and need a check before another request, which can incur a new charge.
 
-## Experimental Cloudflare deployment — outside 0.1.0
+## Cloudflare deployment and remote MCP
 
-Version 0.1.0 supports local deployment only. The implementation notes below are experimental groundwork, not a supported deployment guide. Provider-only Cloudflare deployment is planned for a later 0.1.x release after separate validation.
+Step-by-step setup and client connection instructions are in [Cloudflare deployment](cloudflare.md).
 
 ```sh
 pnpm build:cloudflare
 ```
 
-The application includes a D1/R2 storage adapter and migrations. Cloudflare thumbnail generation uses the IMAGES binding; generated thumbnails are cached in R2 by content hash. Before deploying, create the D1 database and R2 bucket, replace the local D1 ID in `wrangler.jsonc`, and apply `migrations/0001.sql`. Configure `IMAGE_QUEUE_STORAGE_DRIVER=cloudflare`, `IMAGE_QUEUE_CF_ACCESS_TEAM_DOMAIN`, `IMAGE_QUEUE_CF_ACCESS_AUDIENCE` and optionally `IMAGE_QUEUE_MCP_TOKEN`. Provider API keys are Cloudflare platform secrets using the prefixed names above. Protect the site with Cloudflare Access. Browser routes verify the Access JWT. HTTP MCP has separate bearer authentication.
+The application includes a D1/R2 storage adapter and migrations. Cloudflare thumbnail generation uses the IMAGES binding; generated thumbnails are cached in R2 by content hash. API generation runs from the `image-queue-generation` Cloudflare Queue: a request creates the job and returns at once, and the queue consumer runs one job per invocation without automatic retries, so a client time limit cannot interrupt a paid attempt. A job whose lock is held by another operation is offered again every 10 seconds for about five minutes; nothing is sent to the provider until the lock is taken. D1 locks carry a 20-minute lease, longer than a consumer's 15-minute limit, so a lock left by a stopped Worker is released. See [ADR-0020](decisions/0020-remote-mcp-behind-cloudflare-access.md).
+
+Before deploying, create the D1 database, the R2 bucket and the queue, replace the local D1 ID in `wrangler.jsonc`, apply the files in `migrations/` in order, and attach a custom domain. The Worker is not served on `workers.dev` or preview URLs. Configure `IMAGE_QUEUE_STORAGE_DRIVER=cloudflare`, `IMAGE_QUEUE_CF_ACCESS_TEAM_DOMAIN` (for example `team.cloudflareaccess.com`), `IMAGE_QUEUE_CF_ACCESS_AUDIENCE` (the Access application's AUD tag) and `IMAGE_QUEUE_ACCESS_ALLOWED_EMAILS` (comma-separated). Provider API keys are Cloudflare platform secrets using the prefixed names above; use a dedicated key with a monthly spend limit.
+
+Protect the custom domain with one self-hosted Cloudflare Access application and turn on its Managed OAuth, with `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback` on the redirect allowlist, and localhost and loopback clients allowed for Claude Code and Codex. Access then answers MCP clients with OAuth discovery, dynamic client registration and PKCE, and forwards the same signed assertion for a browser session and for an OAuth token. The application verifies that assertion on every panel, API and MCP request and accepts only allowlisted e-mail addresses; a signed-in address outside the allowlist receives 403. Without team domain, audience or allowlist it rejects every request. Invocation logs are off, so request headers are not stored in Workers Logs. The static `IMAGE_QUEUE_MCP_TOKEN` is local-only and is not accepted by a Cloudflare deployment.
+
+Add the remote endpoint in Claude as a custom connector with the URL `https://<your domain>/api/mcp`. The Claude apps on the web, desktop and mobile share connectors. Signing in opens the Access login page. `view_image` returns a preview of a finished image as image content, so it can be shown in a client without MCP Apps views. `refresh_models` rediscovers the image models with the server's key and saves them, because a deployment whose key is a platform secret has no key to enter in Settings. On Cloudflare a request without `source` uses the API and the preferred model; the Codex queue is refused there. The Cloudflare HTTP endpoint is stateless and exposes the base MCP tools.
+
+`scripts/cloudflare-acceptance.mjs` runs the deployable bundle in the local Workers runtime with D1, R2 and Queues, a synthetic Access key set and a stub provider. No request leaves the machine.
+
+```sh
+pnpm build:cloudflare
+pnpm exec wrangler deploy --dry-run --outdir .wrangler/acceptance
+node scripts/cloudflare-acceptance.mjs
+```
 
 The Codex file queue is local-only. Cloudflare can generate using configured API providers. A cloud-to-local queue bridge is outside this implementation.
 

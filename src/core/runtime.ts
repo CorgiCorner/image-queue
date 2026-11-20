@@ -1,4 +1,5 @@
-import { applyVerifiedModelProfiles } from "./model-profiles";
+import { definiteRejectionMessage } from "./api-rejection";
+import { applyVerifiedModelProfiles, assertModelOptions } from "./model-profiles";
 import { UserFacingError } from "./user-facing-error";
 import { requireReleaseProvider } from "./release-providers";
 import { configuration } from "@/core/config";
@@ -8,6 +9,7 @@ import { StorageLockBusy, type Storage } from "../storage/types";
 import type { Job, Model, Reference } from "./schema";
 import { ImageService } from "./service";
 import { readKey } from "./settings";
+import { queueUnavailableMessage } from "./generation-preference";
 export async function service() {
   const store = await storage();
   try {
@@ -28,7 +30,7 @@ export async function retryImageJob(id: string, acknowledgeUncertain = false) {
 export async function retryBlockedQueueJob(id: string, acknowledgeUncertain = false) {
   const api = await service();
   if (configuration("STORAGE_DRIVER") === "cloudflare")
-    throw new UserFacingError("Codex queue requires the local companion");
+    throw new UserFacingError(queueUnavailableMessage);
   return api.store.lock(`retry-${id}`, async () => {
     const original = await api.store.get<Job>("jobs", id);
     if (!original || !["blocked", "uncertain", "failed"].includes(original.status) || original.source !== "queue" || original.archivedAt || original.trashedAt)
@@ -71,6 +73,68 @@ export async function retryBlockedQueueJob(id: string, acknowledgeUncertain = fa
   });
 }
 
+type GenerationQueue = { send(body: { jobId: string }): Promise<unknown> };
+
+async function failQueuedJob(id: string, message: string) {
+  const store = await storage();
+  await store.lock(id, async () => {
+    const current = await store.get<Job>("jobs", id);
+    if (current?.status !== "queued") return;
+    await store.put("jobs", id, {
+      ...current,
+      status: "failed",
+      error: message,
+      updatedAt: new Date().toISOString(),
+    });
+  });
+}
+
+/**
+ * Runs a queued provider job outside the request that created it. An error
+ * raised before the provider attempt is recorded, so the job never stays
+ * queued without a runner. Returns "busy" when another operation holds the
+ * job's lock; nothing was attempted and the caller may try again later.
+ */
+export async function runQueuedJob(id: string): Promise<"finished" | "busy"> {
+  try {
+    await enqueue(id);
+  } catch (error) {
+    if (error instanceof StorageLockBusy && error.key === id) return "busy";
+    await failQueuedJob(id, error instanceof UserFacingError ? error.message : "Generation failed");
+  }
+  return "finished";
+}
+
+/** Records a queued job that could never take its lock; no provider request was made. */
+export async function abandonQueuedJob(id: string) {
+  try {
+    await failQueuedJob(id, "Generation could not start because the request stayed busy. No provider request was made.");
+  } catch (error) {
+    if (!(error instanceof StorageLockBusy)) throw error;
+  }
+}
+
+/**
+ * Starts generation for a new job. Cloudflare hands provider jobs to the
+ * generation queue, because a remote MCP call or a browser request may end
+ * before the provider responds. Elsewhere enqueue leaves durable work for the
+ * local dashboard.
+ */
+export async function dispatch(id: string) {
+  if (configuration("STORAGE_DRIVER") !== "cloudflare") return enqueue(id);
+  const job = await (await storage()).get<Job>("jobs", id);
+  if (job?.source !== "api" || job.status !== "queued") return enqueue(id);
+  const { getCloudflareContext } = await import("@opennextjs/cloudflare");
+  const { env } = await getCloudflareContext({ async: true });
+  const queue = (env as unknown as { GENERATION_QUEUE?: GenerationQueue }).GENERATION_QUEUE;
+  try {
+    if (!queue) throw new Error("GENERATION_QUEUE binding is missing");
+    await queue.send({ jobId: id });
+  } catch {
+    await failQueuedJob(id, "Generation could not be started. No provider request was made.");
+  }
+}
+
 // Submitters only leave durable work for the local dashboard. Cloudflare has its own request lifecycle.
 export async function enqueue(id: string) {
   const store = await storage();
@@ -97,7 +161,7 @@ export async function executeImageJob(id: string, store: Storage,
     if (job.source === "queue") {
       if (job.outputPath) return;
       if (configuration("STORAGE_DRIVER") === "cloudflare")
-        throw new UserFacingError("Codex queue requires the local companion");
+        throw new UserFacingError(queueUnavailableMessage);
       await store.lock("path-settings", async () => {
         const { appendQueue, configuredQueueRoot } = await import(
           "../sources/queue"
@@ -131,10 +195,7 @@ export async function executeImageJob(id: string, store: Storage,
     const profile = models.find((m) => m.id === job.model);
     if (!profile)
       throw new UserFacingError("Refresh provider models and select an available model");
-    if (job.referenceIds.length && !profile.references)
-      throw new UserFacingError("Selected model does not support image references");
-    if (job.transparent && !profile.transparency)
-      throw new UserFacingError("Selected model does not support transparency");
+    assertModelOptions(profile, job);
     const parsedProfile = sizeProfileSchema.safeParse(profile.sizeProfile);
     if (!parsedProfile.success)
       throw new UserFacingError("This model has no valid size profile. Choose another model or refresh its configuration.");
@@ -193,6 +254,9 @@ export async function executeImageJob(id: string, store: Storage,
             providerSizeParameters: attempt.providerSizeParameters,
             providerResultSize: result.generatedDimensions,
             generatedSize: { width: result.width ?? job.width, height: result.height ?? job.height },
+            outputFormat: job.outputFormat ?? "png",
+            ...(job.frameCount !== undefined ? { frameCount: job.frameCount } : {}),
+            ...(job.frameDurationMs !== undefined ? { frameDurationMs: job.frameDurationMs } : {}),
             usage: result.usage,
             createdAt: new Date().toISOString(),
           },
@@ -207,12 +271,21 @@ export async function executeImageJob(id: string, store: Storage,
       if(current?.attemptId===attempt.attemptId)await store.put("jobs", id, mergeApiResult(current,finished));
       if (result.adaptationError) await options?.failed(result.adaptationError);
     } catch (error) {
-      // Once output is received, storage failures are recovered from the receipt, never resubmitted.
-      if (received) throw error;
+      // Once output is received, the local runner recovers storage failures from the receipt, never resubmits.
+      // Without a runner (Cloudflare) there is no receipt, so the attempt is recorded as uncertain below.
+      if (received && options) throw error;
+      // The source's processing state gets the short reason and whether to stop;
+      // the request keeps the provider's own reason for a definite rejection.
       const failure = providerFailure(error);
+      const rejection = received ? undefined : await definiteRejectionMessage(error);
       await options?.failed(failure.error, failure.stop, failure.resumeAt);
       const current=await store.get<Job>("jobs",id);
-      if(current?.attemptId===attempt.attemptId)await store.put("jobs", id, { ...current, status: failure.status, error: failure.error, updatedAt: new Date().toISOString() });
+      if(current?.attemptId===attempt.attemptId)await store.put("jobs", id, {
+        ...current,
+        status: rejection ? "failed" : failure.status,
+        error: rejection ?? failure.error,
+        updatedAt: new Date().toISOString(),
+      });
     }
   });
 }

@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { CloudflareStorage } from "../src/storage/cloudflare";
+import { describe, expect, it, vi } from "vitest";
+import { CloudflareStorage, lockLease } from "../src/storage/cloudflare";
 
 function bindings() {
   const records = new Map<string, string>();
-  const locks = new Map<string, string>();
+  const locks = new Map<string, { token: string; expiresAt: number | null }>();
   const blobs = new Map<string, { bytes: Uint8Array; mime: string }>();
   const db = {
     prepare(sql: string) {
@@ -26,10 +26,13 @@ function bindings() {
                 records.set(`${args[0]}/${args[1]}`, String(args[2]));
               if (sql.startsWith("INSERT INTO locks")) {
                 if (locks.has(String(args[0]))) throw new Error("unique");
-                locks.set(String(args[0]), String(args[1]));
+                locks.set(String(args[0]), { token: String(args[1]), expiresAt: args[2] as number | null });
               }
               if (sql.startsWith("DELETE FROM records")) records.delete(`${args[0]}/${args[1]}`);
-              if (sql.startsWith("DELETE FROM locks"))
+              if (sql.startsWith("DELETE FROM locks WHERE id=? AND expires_at")) {
+                const held = locks.get(String(args[0]));
+                if (held && held.expiresAt !== null && held.expiresAt < Number(args[1])) locks.delete(String(args[0]));
+              } else if (sql.startsWith("DELETE FROM locks") && locks.get(String(args[0]))?.token === args[1])
                 locks.delete(String(args[0]));
             },
           };
@@ -56,7 +59,7 @@ function bindings() {
         : null;
     },
   };
-  return new CloudflareStorage(db as never, bucket as never);
+  return Object.assign(new CloudflareStorage(db as never, bucket as never), { fakeLocks: locks });
 }
 describe("Cloudflare storage contract", () => {
   it("stores, replaces and lists JSON records", async () => {
@@ -87,6 +90,23 @@ describe("Cloudflare storage contract", () => {
       }),
     ).rejects.toThrow("fail");
     expect(await s.lock("test", async () => 2)).toBe(2);
+  });
+  it("lets a caller take over a lock whose holder died after its lease", async () => {
+    const s = bindings();
+    const start = Date.now();
+    s.fakeLocks.set("job", { token: "dead", expiresAt: start + 1000 });
+    await expect(s.lock("job", async () => 1)).rejects.toThrow("progress");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start + 2000);
+    try {
+      expect(await s.lock("job", async () => s.fakeLocks.get("job")?.expiresAt)).toBe(start + 2000 + lockLease);
+      expect(s.fakeLocks.has("job")).toBe(false);
+      // A legacy lock without a lease is never taken over.
+      s.fakeLocks.set("legacy", { token: "old", expiresAt: null });
+      await expect(s.lock("legacy", async () => 1)).rejects.toThrow("progress");
+    } finally {
+      clock.mockRestore();
+    }
+    expect(lockLease).toBeGreaterThan(15 * 60 * 1000);
   });
 });
 

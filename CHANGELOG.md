@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 — 2026-11-20
+
+- Deploy image-queue to your own Cloudflare account with `pnpm cloudflare:setup`: D1, R2, a generation queue, a custom domain, Cloudflare Access with Managed OAuth and the Worker secrets in one repeatable command. See [docs/cloudflare.md](docs/cloudflare.md) and [ADR-0020](docs/decisions/0020-remote-mcp-behind-cloudflare-access.md).
+- Connect the hosted MCP endpoint from Claude on the web, desktop and phone, Claude Code or Codex. Every request needs a Cloudflare Access sign-in from an allowed address; other signed-in accounts get 403, and the local static MCP token is not accepted there. API generation runs from the queue, one attempt per job without automatic retries.
+- Hosted deployments generate through the OpenAI API by default. `refresh_models` loads the model list with the server's key, `view_image` returns a finished image, and the inline request, image and gallery views work on the stateless endpoint. Reading tools are marked read-only so hosts can run them without asking.
+- Inline views follow the host's font and colours, show a loading state, download the full file and play GIFs as a light animated preview. On a phone a swipe scrolls the conversation and a tap selects a place for a change. The Next version form explains what it does.
+- The next version of a generated GIF is generated again from its prompt with the requested changes, keeping its model, size, frame count and frame duration.
+- Every OpenAI image model has its own profile: GPT Image 2.6 Sunburst (the new default) and Flare, 2.5 Sunburst and Flare, GPT Image 2, 1.5 and 1 mini, with documented custom sizes, `quality` and, for 2.6, `complexity`. `list_models` and `get_generation_source` report each model's capabilities.
+- API requests can ask for PNG, WebP, JPEG, GIF or SVG when the model lists that format. GIF requests set frame count and duration and are checked against the frame sheet the model can render before submission. One submission can create up to 10 jobs.
+- A definite provider rejection, including an account with no credits, is stored as failed with the provider's reason. A corrected request may reuse the idempotency key of a failed or cancelled one.
+- The sidebar shows the generation source in use and lets you switch it. Connect an agent shows the remote MCP steps on a hosted workspace. Dark theme selects, fields and checkboxes read as one system.
+
 ## 0.1.5 — 2026-11-17
 
 - Send the first prompt directly to Inbox. Opening a project or topic sets the destination for the next image. A paused queue shows its status on mobile before submission.

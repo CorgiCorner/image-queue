@@ -6,11 +6,12 @@ import type { Storage } from "../storage/types";
 
 /** Persisted state works over stdio too, where the dashboard runner is a different process. */
 export async function executionStatus(store: Storage, source: "queue"|"api" = "queue") {
+  // A hosted deployment runs provider jobs from its generation queue; it has no local processing controls.
+  if (source === "api" && configuration("STORAGE_DRIVER") === "cloudflare") return {
+    state: "hosted" as const, requiresUserAction: false, nextAction: "Check this job for the provider result.",
+  };
   const controls = await processingStatus(store);
   if (source === "api") {
-    if (configuration("STORAGE_DRIVER") === "cloudflare") return {
-      state: "hosted" as const, requiresUserAction: false, nextAction: "Check this job for the provider result.",
-    };
     const api = controls.api;
     const paused = controls.paused || api.paused;
     const state = paused ? "paused" : api.blockedReason ? "blocked" : api.online ? "ready" : "offline";

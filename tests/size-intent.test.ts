@@ -23,7 +23,7 @@ it("validates model dimension and resolution constraints",async()=>{
   expect(()=>resolveModelSize({mode:"aspect-ratio",ratios:["1:1"],levels:[]},{aspectRatio:"9:16"})).toThrow();
   const profile={mode:"dimensions" as const,minSide:256,maxSide:4096,multiple:16,minPixels:65536,maxPixels:9000000,minRatio:1/3,maxRatio:3};
   expect(resolveModelSize(profile,{width:1024,height:1024}).requiresResize).toBe(false);
-  expect(()=>resolveModelSize(profile,{width:1025,height:1024})).toThrow("limits");
+  expect(resolveModelSize(profile,{width:1025,height:1024})).toEqual({target:{width:1025,height:1024},parameters:{size:"1040x1024"},requiresResize:true});
 });
 
 it("uses the model native size for ratio-only requests", async () => {
@@ -74,8 +74,8 @@ it("checks every dimension boundary with an actionable error", async () => {
   expect(resolveModelSize(profile, { width: 512, height: 512 }).requiresResize).toBe(false);
   expect(resolveModelSize(profile, { width: 2048, height: 1024 }).requiresResize).toBe(false);
   expect(() => resolveModelSize(profile, { width: 2064, height: 1024 })).toThrow("between 256 and 2048 pixels");
-  expect(() => resolveModelSize(profile, { width: 1025, height: 1024 })).toThrow("divisible by 16");
-  expect(() => resolveModelSize(profile, { width: 256, height: 256 })).toThrow("total pixels");
+  expect(resolveModelSize(profile, { width: 1025, height: 1024 }).parameters).toEqual({ size: "1040x1024" });
+  expect(resolveModelSize(profile, { width: 256, height: 256 })).toEqual({ target: { width: 256, height: 256 }, parameters: { size: "512x512" }, requiresResize: true });
   expect(() => resolveModelSize(profile, { width: 1536, height: 1536 })).toThrow("total pixels");
   expect(() => resolveModelSize(profile, { width: 1536, height: 512 })).toThrow("width/height between 0.5 and 2");
 });
@@ -104,4 +104,23 @@ it("rejects a native size too small to produce the requested aspect ratio", asyn
   const { resolveModelSize } = await import("../src/core/size-intent");
   expect(() => resolveModelSize({ mode: "fixed", sizes: [{ width: 1, height: 1 }] },
     { aspectRatio: "21:9" })).toThrow("No native size can represent");
+});
+
+it("resolves gpt-image-2.6-flare sizes on its 16-pixel grid", async () => {
+  const { resolveModelSize } = await import("../src/core/size-intent");
+  const { verifiedModelProfiles } = await import("../src/core/model-profiles");
+  const flare = verifiedModelProfiles.find(entry => entry.model === "gpt-image-2.6-flare")!.sizeProfile;
+  expect(resolveModelSize(flare, { aspectRatio: "16:9" })).toEqual({ target: { width: 2048, height: 1152 }, parameters: { size: "2048x1152" }, requiresResize: false });
+  expect(resolveModelSize(flare, { aspectRatio: "9:16" }).parameters).toEqual({ size: "1152x2048" });
+  expect(resolveModelSize(flare, { aspectRatio: "21:9" }).parameters).toEqual({ size: "2688x1152" });
+  expect(resolveModelSize(flare, { width: 1536, height: 864 })).toMatchObject({ parameters: { size: "1536x864" }, requiresResize: false });
+  expect(resolveModelSize(flare, { width: 3840, height: 2160 })).toMatchObject({ parameters: { size: "3840x2160" }, requiresResize: false });
+  // Small sprites are generated at the smallest allowed size and fitted down, never upscaled.
+  const sprite = resolveModelSize(flare, { width: 256, height: 256 });
+  expect(sprite).toEqual({ target: { width: 256, height: 256 }, parameters: { size: "816x816" }, requiresResize: true });
+  expect(816 * 816).toBeGreaterThanOrEqual(655360);
+  expect(resolveModelSize(flare, { width: 1920, height: 1080 })).toEqual({ target: { width: 1920, height: 1080 }, parameters: { size: "1920x1088" }, requiresResize: true });
+  expect(() => resolveModelSize(flare, { width: 4096, height: 2304 })).toThrow("between 16 and 3840 pixels");
+  expect(() => resolveModelSize(flare, { width: 3200, height: 1024 })).toThrow("width/height between 1/3 and 3");
+  expect(() => resolveModelSize(flare, { width: 3840, height: 3840 })).toThrow("total pixels");
 });

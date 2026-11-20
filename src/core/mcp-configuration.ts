@@ -24,3 +24,39 @@ export function mcpConfigurations(local?: McpLaunch, dashboardOrigin?: string) {
     { name: "Claude Code", format: "JSON", value: JSON.stringify({ mcpServers: { "image-queue": config } }, null, 2) },
   ];
 }
+
+/**
+ * How each client connects to a hosted deployment's remote MCP endpoint. The
+ * endpoint signs clients in through OAuth, so nothing here carries a key.
+ */
+export function remoteMcpClients(origin: string) {
+  const url = `${new URL(origin).origin}/api/mcp`;
+  return {
+    url,
+    clients: [
+      {
+        name: "Claude",
+        steps: [
+          "In Claude on the web, desktop or phone, open Settings, then Connectors, then Add custom connector.",
+          "Name it image-queue, paste the server URL and leave the advanced OAuth fields empty.",
+          "Select Connect and sign in on the page that opens.",
+          "In a chat, enable the connector and ask for an image.",
+        ],
+        note: "One connector serves Claude on the web, desktop and phone.",
+        after: "After an update that changes tools, disconnect and connect the connector again, then start a new chat.",
+      },
+      {
+        name: "Claude Code",
+        format: "Shell",
+        value: `claude mcp add --transport http image-queue ${url}`,
+        note: "Run in a terminal. Then run /mcp in Claude Code, select image-queue and authenticate.",
+      },
+      {
+        name: "Codex",
+        format: "Shell",
+        value: `codex mcp add image-queue --url ${url}\ncodex mcp login image-queue`,
+        note: "Run in a terminal. The login command opens the sign-in page in your browser.",
+      },
+    ],
+  };
+}

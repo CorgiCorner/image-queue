@@ -1,7 +1,14 @@
 import { annotationSelection } from "../../core/annotation";
-import { CompactApp, applyDocumentTheme, applyHostStyleVariables } from "./compact-app";
+import { CompactApp, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } from "./compact-app";
+import { loadPreview } from "./thumbnail";
+import { sourceLabel } from "./source-label";
+import { jobStatusLabels } from "../../core/job-status";
+import type { Job } from "../../core/schema";
+import { isMotionReduced } from "../../lib/motion";
+import { nextVersionMode } from "../../core/image-format";
 const app = new CompactApp({ name: "image-queue-image", version: "1.0.0" });
 const status = document.querySelector<HTMLElement>("[role=status]")!;
+const source = document.querySelector<HTMLElement>("#source");
 const preview = document.querySelector<HTMLImageElement>("#preview")!;
 const notes = document.querySelector<HTMLElement>("#notes")!;
 const pins = document.querySelector<HTMLElement>("#pins")!;
@@ -12,11 +19,22 @@ const saveNote = document.querySelector<HTMLButtonElement>("#save-note")!;
 const clearPoint = document.querySelector<HTMLButtonElement>("#clear-point")!;
 const draftPoint = document.querySelector<HTMLElement>("#draft-point")!;
 const queueButton = document.querySelector<HTMLButtonElement>("#queue-notes")!;
+const saved = document.querySelector<HTMLElement>(".saved");
+const noCorrections = document.querySelector<HTMLElement>("#no-corrections");
+const noteHint = document.querySelector<HTMLElement>("#note-hint");
+const hints = {
+  edit: "Describe a change and save it. If it is about one place, tap that place on the image first. Request next version then generates a new image with your saved changes.",
+  regenerate: "Describe a change and save it. Request next version then generates the whole animation again from its prompt with your saved changes, so other details can differ too.",
+};
+/** "edit" changes the image itself, "regenerate" makes an animation again from its prompt, "none" offers no changes (SVG). */
+let nextVersion: "edit" | "regenerate" | "none" = "edit";
 let correctionKey: string | undefined;
 let canQueue = false;
 let imageId = "";
 let notePoint: { x: number; y: number; w?: number; h?: number } | undefined;
-let dragStart: { pointerId: number; x: number; y: number } | undefined;
+let dragStart: { pointerId: number; x: number; y: number; touch: boolean; clientX: number; clientY: number } | undefined;
+/** A finger that moves further than this is scrolling the conversation, not marking the image. */
+const TAP_SLOP_PX = 10;
 let previousPoint: typeof notePoint;
 function updateDraftPoint() {
   draftPoint.hidden = !notePoint;
@@ -50,16 +68,20 @@ function cancelAnnotation(event: KeyboardEvent) {
 }
 document.addEventListener("keydown", cancelAnnotation);
 preview.addEventListener("pointerdown", event => {
-  if (preview.hidden || disposed || dragStart || event.button !== 0) return;
+  if (preview.hidden || disposed || dragStart || event.button !== 0 || nextVersion !== "edit") return;
   const point = pointerPosition(event);
   if (!point) return;
-  event.preventDefault();
+  const touch = event.pointerType === "touch";
   previousPoint = notePoint;
-  dragStart = { pointerId: event.pointerId, ...point };
+  dragStart = { pointerId: event.pointerId, ...point, touch, clientX: event.clientX, clientY: event.clientY };
+  // A finger keeps scrolling the conversation; only a tap that stays in place marks a point.
+  // Mouse and pen drag out an area.
+  if (touch) return;
+  event.preventDefault();
   preview.setPointerCapture(event.pointerId);
 });
 preview.addEventListener("pointermove", event => {
-  if (!dragStart || dragStart.pointerId !== event.pointerId) return;
+  if (!dragStart || dragStart.pointerId !== event.pointerId || dragStart.touch) return;
   const point = pointerPosition(event);
   if (!point) return;
   notePoint = annotationSelection(dragStart, point);
@@ -69,11 +91,12 @@ preview.addEventListener("pointerup", event => {
   if (!dragStart || dragStart.pointerId !== event.pointerId) return;
   const start = dragStart;
   dragStart = undefined;
+  if (start.touch && Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) > TAP_SLOP_PX) return;
   const point = pointerPosition(event);
   if (!point || disposed) return;
-  notePoint = annotationSelection(start, point);
+  notePoint = start.touch ? { x: start.x, y: start.y } : annotationSelection(start, point);
   updateDraftPoint();
-  status.textContent = "Area selected. Add a note below.";
+  status.textContent = notePoint.w ? "Area selected. Describe the change." : "Place selected. Describe the change.";
   noteText.focus();
 });
 for (const eventName of ["pointercancel", "lostpointercapture"] as const) {
@@ -136,8 +159,22 @@ function render(result: { content?: unknown[] }) {
     }
     updateDraftPoint();
     imageId = data.image.id;
-    canQueue = data.image.status === "done" && !data.image.archivedAt && data.notes.some((note: { sentInJobId?: string }) => !note.sentInJobId);
+    nextVersion = ["edit", "regenerate", "none"].includes(data.image.nextVersion) ? data.image.nextVersion : nextVersionMode(data.image);
+    const correctable = nextVersion !== "none";
+    noteForm.hidden = !correctable;
+    if (saved) saved.hidden = !correctable;
+    if (noCorrections) noCorrections.hidden = correctable;
+    if (noteHint && nextVersion !== "none") noteHint.textContent = hints[nextVersion];
+    // Only an edit can be about one place: the place goes to the model marked on a copy of the image.
+    if (nextVersion !== "edit") {
+      notePoint = undefined;
+      dragStart = undefined;
+      updateDraftPoint();
+    }
+    canQueue = correctable && data.image.status === "done" && !data.image.archivedAt && data.notes.some((note: { sentInJobId?: string }) => !note.sentInJobId);
     queueButton.disabled = !canQueue;
+    // With nothing to send the button only adds noise; it appears with the first saved note.
+    queueButton.hidden = !data.notes.some((note: { sentInJobId?: string }) => !note.sentInJobId);
     const current = ++generation;
     if (!keepPreview) {
       preview.hidden = true;
@@ -159,7 +196,7 @@ function render(result: { content?: unknown[] }) {
       item.value = note.sentInJobId ? 0 : pendingNumber;
       item.id = `note-${notes.childElementCount + 1}`;
       notes.append(item);
-      if (!note.sentInJobId && note.x !== undefined && note.y !== undefined) {
+      if (nextVersion === "edit" && !note.sentInJobId && note.x !== undefined && note.y !== undefined) {
         const pin = document.createElement("button");
         pin.type = "button";
         pin.className = "note-pin";
@@ -194,31 +231,36 @@ function render(result: { content?: unknown[] }) {
       versions.append(button);
     }
     }
-    status.textContent = data.image.status;
+    // A single version needs no switcher.
+    versions.hidden = data.versions.length < 2;
+    const statusLabel = jobStatusLabels[data.image.status as Job["status"]];
+    status.textContent = statusLabel;
+    if (source) source.textContent = sourceLabel(data.image);
     if (keepPreview) pins.hidden = false;
-    if (data.image.status === "done" && !keepPreview) void app.readServerResource({ uri: `image-queue://thumbnail/${encodeURIComponent(data.image.id)}` }).then(resource => {
+    const animated = data.image.outputFormat === "gif" && !isMotionReduced();
+    if (data.image.status === "done" && !keepPreview) void loadPreview(app, data.image.id, () => disposed || generation !== current, { animated }).then(({ url }) => {
       if (disposed || generation !== current) return;
-      const image = resource.contents.find(item => "blob" in item);
-      if (image && "blob" in image && image.mimeType?.startsWith("image/")) {
-        preview.onload = () => {
-          if (!disposed && generation === current) pins.hidden = false;
-        };
-        preview.onerror = () => {
-          if (!disposed && generation === current) {
-            pins.hidden = true;
-            status.textContent = "Preview unavailable";
-          }
-        };
-        preview.src = `data:${image.mimeType};base64,${image.blob}`;
-        preview.hidden = false;
-      }
-    }).catch(() => { if (!disposed && generation === current) status.textContent = "Preview unavailable"; });
+      preview.onload = () => {
+        if (!disposed && generation === current) pins.hidden = false;
+      };
+      preview.onerror = () => {
+        if (!disposed && generation === current) {
+          pins.hidden = true;
+          status.textContent = "Preview unavailable";
+        }
+      };
+      preview.src = url;
+      preview.hidden = false;
+    }).catch(() => {
+      // A late preview failure must not replace a message about the user's own action.
+      if (!disposed && generation === current && status.textContent === statusLabel) status.textContent = "Preview unavailable";
+    });
   } catch { status.textContent = "Invalid image response."; }
 }
 queueButton.addEventListener("click", async () => {
   if (disposed || queueButton.disabled || !canQueue || !imageId) return;
   if (saveNote.disabled || noteText.value.trim()) {
-    status.textContent = "Save your note before adding the correction to the queue.";
+    status.textContent = "Save your change first, then request the next version.";
     noteText.focus();
     return;
   }
@@ -242,10 +284,10 @@ queueButton.addEventListener("click", async () => {
     if (!disposed && generation === request) {
       correctionKey = undefined;
       await show(target);
-      if (!disposed && imageId === target) status.textContent = "Correction added to queue.";
+      if (!disposed && imageId === target) status.textContent = "Next version requested.";
     }
   } catch {
-    if (!disposed && generation === request) status.textContent = "Could not queue correction. Retry to check the same request.";
+    if (!disposed && generation === request) status.textContent = "Could not request the next version. Retry to check the same request.";
   } finally {
     queueButton.disabled = !canQueue;
   }
@@ -270,7 +312,7 @@ noteForm.addEventListener("submit", async event => {
       await show(target);
     }
   } catch {
-    if (!disposed && generation === request) status.textContent = "Could not save note. Your text is preserved.";
+    if (!disposed && generation === request) status.textContent = "Could not save the change. Your text is preserved.";
   } finally {
     saveNote.disabled = false;
   }
@@ -279,6 +321,7 @@ app.ontoolresult = render;
 app.onhostcontextchanged = context => {
   if (context.theme) applyDocumentTheme(context.theme);
   if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
 };
 app.onteardown = async () => {
   disposed = true;
@@ -291,4 +334,5 @@ app.connect().then(() => {
   const context = app.getHostContext();
   if (context?.theme) applyDocumentTheme(context.theme);
   if (context?.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context?.styles?.css?.fonts) applyHostFonts(context?.styles.css.fonts);
 }).catch(() => { if (!disposed) status.textContent = "Unable to connect to the host."; });

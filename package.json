@@ -1,6 +1,6 @@
 {
   "name": "image-queue",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Local-first image queue and generation workspace",
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3215",
@@ -12,6 +12,7 @@
     "mcp": "node --env-file-if-exists=.env.local --import tsx src/mcp/stdio.ts",
     "build:cloudflare": "opennextjs-cloudflare build",
     "preview:cloudflare": "opennextjs-cloudflare preview",
+    "cloudflare:setup": "tsx scripts/cloudflare-setup.ts",
     "pool": "node --env-file-if-exists=.env.local --import tsx scripts/pool.ts",
     "benchmark": "tsx scripts/benchmark.ts",
     "build:mcp": "pnpm check:boundaries && pnpm build:mcp-views && esbuild src/mcp/stdio.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/mcp.mjs",

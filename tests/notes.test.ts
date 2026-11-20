@@ -580,8 +580,9 @@ it("rejects unsupported real alpha before persisting an API correction or consum
   const {job} = await api.importImage("transparent.png","image/png",bytes,project.id);
   const note = await addNote(store,{imageId:job.id,text:"Change the circle"});
   const refs = await Promise.all(["original","notes"].map(name => api.addReference(project.id,name,"image/png",bytes)));
-  await store.put("models","openai",[{id:"gpt-image-2.6-flare",provider:"openai",references:true,transparency:false}]);
-  await expect(createCorrection(api,{imageId:job.id,referenceIds:refs.map(ref=>ref.id),idempotencyKey:"alpha-blocked",generation:{source:"api",provider:"openai",model:"gpt-image-2.6-flare"}})).rejects.toThrow("supports transparent images");
+  // gpt-image-2.6-flare supports transparency, so use an opaque-only fixture model.
+  await store.put("models","openai",[{id:"gpt-image-opaque-fixture",provider:"openai",references:true,transparency:false}]);
+  await expect(createCorrection(api,{imageId:job.id,referenceIds:refs.map(ref=>ref.id),idempotencyKey:"alpha-blocked",generation:{source:"api",provider:"openai",model:"gpt-image-opaque-fixture"}})).rejects.toThrow("supports transparent images");
   expect(await store.get("jobs","IMG-alpha-blocked")).toBeUndefined();
   expect(await store.get("correction-intents","alpha-blocked")).toBeUndefined();
   expect(await store.get("notes",note.id)).not.toHaveProperty("sentInJobId");

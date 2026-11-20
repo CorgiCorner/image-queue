@@ -72,21 +72,31 @@ export function resolveModelSize(profile: SizeProfile, input: z.infer<typeof siz
     throw new UserFacingError("This model does not support resolution levels");
   }
   if (profile.mode === "dimensions") {
-    const pixels=target.width*target.height;
-    if (target.width < profile.minSide || target.height < profile.minSide ||
-        target.width > profile.maxSide || target.height > profile.maxSide) {
+    if (input.width === undefined) {
+      // Ratio-only: pick the smallest exact-ratio size on the model's grid that is at least as large as the queue default.
+      const [widthUnit, heightUnit] = input.aspectRatio!.split(":").map(Number);
+      const step = lcm(profile.multiple / gcd(profile.multiple, widthUnit), profile.multiple / gcd(profile.multiple, heightUnit));
+      const minimum = Math.max(profile.minPixels, target.width * target.height);
+      let scale = step * Math.max(1, Math.ceil(Math.sqrt(minimum / (widthUnit * heightUnit)) / step));
+      while (widthUnit * scale * heightUnit * scale < minimum) scale += step;
+      target = { width: widthUnit * scale, height: heightUnit * scale };
+    }
+    if (target.width > profile.maxSide || target.height > profile.maxSide) {
       throw new UserFacingError(`This model's limits require each side between ${profile.minSide} and ${profile.maxSide} pixels`);
     }
-    if (target.width % profile.multiple || target.height % profile.multiple) {
-      throw new UserFacingError(`This model's limits require dimensions divisible by ${profile.multiple}`);
-    }
-    if (pixels < profile.minPixels || pixels > profile.maxPixels) {
+    if (target.width * target.height > profile.maxPixels) {
       throw new UserFacingError(`This model's limits require between ${profile.minPixels} and ${profile.maxPixels} total pixels`);
     }
     if (ratio < profile.minRatio || ratio > profile.maxRatio) {
-      throw new UserFacingError(`This model's limits require width/height between ${profile.minRatio} and ${profile.maxRatio}`);
+      throw new UserFacingError(`This model's limits require width/height between ${formatRatio(profile.minRatio)} and ${formatRatio(profile.maxRatio)}`);
     }
-    return {target,parameters:{size:`${target.width}x${target.height}`},requiresResize:false};
+    const native = dimensionsNativeSize(profile, target);
+    if (!native) throw new UserFacingError("No native size within this model's limits can cover the requested dimensions without upscaling");
+    return {
+      target,
+      parameters: { size: `${native.width}x${native.height}` },
+      requiresResize: native.width !== target.width || native.height !== target.height,
+    };
   }
   const hasExactDimensions = input.width !== undefined;
   const candidates = profile.sizes.filter(size =>
@@ -102,4 +112,33 @@ export function resolveModelSize(profile: SizeProfile, input: z.infer<typeof siz
     target = { width: widthUnit * scale, height: heightUnit * scale };
   }
   return {target,parameters:{size:`${native.width}x${native.height}`},requiresResize:native.width!==target.width || native.height!==target.height};
+}
+
+type DimensionsProfile = Extract<SizeProfile, { mode: "dimensions" }>;
+/** Smallest size on the model's grid that covers the target, so fitting only crops or shrinks. */
+function dimensionsNativeSize(profile: DimensionsProfile, target: { width: number; height: number }) {
+  const scale = Math.max(
+    1,
+    Math.sqrt(profile.minPixels / (target.width * target.height)),
+    profile.minSide / Math.min(target.width, target.height),
+  );
+  const round = (value: number) => Math.ceil(value / profile.multiple) * profile.multiple;
+  let width = round(target.width * scale), height = round(target.height * scale);
+  while (width * height < profile.minPixels) {
+    if (width / height <= target.width / target.height) width += profile.multiple;
+    else height += profile.multiple;
+  }
+  const ratio = width / height;
+  if (width > profile.maxSide || height > profile.maxSide || width * height > profile.maxPixels ||
+      ratio < profile.minRatio || ratio > profile.maxRatio) return undefined;
+  return { width, height };
+}
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+function lcm(a: number, b: number) {
+  return a / gcd(a, b) * b;
+}
+function formatRatio(value: number) {
+  return Math.abs(value - 1 / 3) < 1e-9 ? "1/3" : String(value);
 }

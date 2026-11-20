@@ -13,6 +13,8 @@ import {
 } from "../src/core/schema";
 import { ImageService } from "../src/core/service";
 import { readKey, saveKey } from "../src/core/settings";
+import { extensionForMime, extensionForOutputFormat, mimeForDetectedType, svgDocument } from "../src/core/image-format";
+import { requestsForCount } from "../src/core/request-count";
 import { FileStorage } from "../src/storage/fs";
 import { safeKey } from "../src/storage/types";
 
@@ -57,12 +59,58 @@ describe("image requests", () => {
     ).rejects.toThrow("Idempotency");
     expect(await service.jobs()).toHaveLength(1);
   });
+  it("refuses output format and frame settings for queue requests before creating a job", async () => {
+    const project = await service.createProject("Formats");
+    const input = request(project.id);
+    await expect(service.create({ ...input, outputFormat: "webp" })).rejects.toThrow("Output format and frame settings apply only to API generation");
+    await expect(service.create({ ...input, frameCount: 4 })).rejects.toThrow("Output format and frame settings apply only to API generation");
+    await expect(service.create({ ...input, frameDurationMs: 200 })).rejects.toThrow("Output format and frame settings apply only to API generation");
+    expect(await service.jobs()).toEqual([]);
+  });
+  it("refuses GIF output with reference images before storing a job", async () => {
+    const project = await service.createProject("GIF");
+    await service.store.put("models", "openai", [{
+      id: "gpt-image-2.6-sunburst", provider: "openai", name: "Sunburst",
+      references: true, transparency: true,
+      sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
+    }]);
+    const reference = await service.addReference(project.id, "ref.png", "image/png", png);
+    await expect(service.create({
+      ...request(project.id), source: "api", model: "gpt-image-2.6-sunburst", transparent: false,
+      outputFormat: "gif", referenceIds: [reference.id],
+    })).rejects.toThrow("GIF output with reference images is not supported by this application yet.");
+    expect(await service.jobs()).toEqual([]);
+  });
   it("requires a project and model for API requests", async () => {
     await expect(service.create(request("missing"))).rejects.toThrow("Project");
     const p = await service.createProject("One");
     await expect(
       service.create({ ...request(p.id), source: "api" }),
     ).rejects.toThrow("model");
+  });
+  it("accepts the documented format and frame bounds", () => {
+    const base = { ...request("test"), source: "api" as const, model: "gpt-image-2.6-sunburst" };
+    expect(requestSchema.safeParse({ ...base, outputFormat: "gif", frameCount: 2, frameDurationMs: 20 }).success).toBe(true);
+    expect(requestSchema.safeParse({ ...base, outputFormat: "gif", frameCount: 16, frameDurationMs: 2000 }).success).toBe(true);
+    for (const frameCount of [1, 17])
+      expect(requestSchema.safeParse({ ...base, outputFormat: "gif", frameCount }).success).toBe(false);
+    for (const frameDurationMs of [19, 2001])
+      expect(requestSchema.safeParse({ ...base, outputFormat: "gif", frameDurationMs }).success).toBe(false);
+    expect(requestSchema.safeParse({ ...base, outputFormat: "bmp" }).success).toBe(false);
+    const counted = requestsForCount({ ...base, idempotencyKey: "k".repeat(96) }, 10);
+    expect(requestSchema.safeParse(counted[0]).success).toBe(true);
+    expect(counted[9].idempotencyKey).toBe(`${"k".repeat(96)}-10`);
+    expect(requestSchema.safeParse(counted[9]).success).toBe(false);
+    expect(() => requestsForCount(base, 11)).toThrow("1 to 10");
+    expect(extensionForOutputFormat("jpeg")).toBe("jpg");
+    expect(extensionForOutputFormat()).toBe("png");
+    expect(extensionForMime("image/svg+xml")).toBe("svg");
+    expect(extensionForMime("image/jpeg; charset=binary")).toBe("jpg");
+    expect(extensionForMime("image/gif")).toBe("gif");
+    expect(mimeForDetectedType("jpg")).toBe("image/jpeg");
+    expect(mimeForDetectedType("bmp")).toBeUndefined();
+    expect(svgDocument(new TextEncoder().encode("<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"))).toBe(true);
+    expect(svgDocument(new TextEncoder().encode("hello <svg></svg>"))).toBe(false);
   });
   it("rejects queue injection", () => {
     expect(

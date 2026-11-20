@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   moveProject: vi.fn(),
   revalidatePath: vi.fn(),
   enqueue: vi.fn(),
+  dispatch: vi.fn(),
   retryBlocked: vi.fn(),
   retryImage: vi.fn(),
   retryImageJob: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock("../src/core/runtime", () => ({
     },
   }),
   enqueue: mocks.enqueue,
+  dispatch: mocks.dispatch,
   retryBlockedQueueJob: mocks.retryBlocked,
   retryImageJob: mocks.retryImageJob,
 }));
@@ -114,22 +116,38 @@ it("queues Codex images synchronously", async () => {
   await requestImageAction(request);
   expect(mocks.enqueue).toHaveBeenCalledWith("IMG-one");
 });
-it("on Cloudflare executes API images after returning and preserves failure status", async () => {
-  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
+it("creates one panel job per count without storing the count", async () => {
+  mocks.create.mockImplementation(async (input: { idempotencyKey: string; count?: number }) => ({
+    id: `IMG-${input.idempotencyKey}`, source: "queue", status: "queued", idempotencyKey: input.idempotencyKey,
+  }));
+  const result = await requestImageAction({ ...request, count: 3 });
+  expect(mocks.create.mock.calls.map(call => call[0].idempotencyKey)).toEqual(["one", "one-2", "one-3"]);
+  expect(mocks.create.mock.calls.every(call => call[0].count === undefined)).toBe(true);
+  expect(result?.data).toMatchObject({ id: "IMG-one" });
+  const data = result?.data;
+  expect(data && "jobs" in data ? data.jobs.map(job => job.id) : []).toEqual(["IMG-one", "IMG-one-2", "IMG-one-3"]);
+  expect(mocks.enqueue).toHaveBeenCalledTimes(3);
+});
+it("leaves a local API image as durable work for the API runner, in the request", async () => {
   mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
-  mocks.get.mockResolvedValue({ id: "IMG-one", source: "api", status: "queued" });
   mocks.get.mockImplementation(async (collection: string) => collection === "models"
     ? [{ id: "gpt-image-1.5", provider: "openai", sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } }]
     : { id: "IMG-one", source: "api", status: "queued" });
   await requestImageAction({ ...request, source: "api", model: "gpt-image-1.5" });
-  await mocks.after.mock.calls[0][0]();
-  mocks.enqueue.mockRejectedValue(new Error("Authorization: Bearer private-background-key"));
-  await mocks.after.mock.calls[0][0]();
-  expect(mocks.put).toHaveBeenCalledWith(
-    "jobs",
-    "IMG-one",
-    expect.objectContaining({ status: "failed", error: "Generation failed" }),
-  );
+  expect(mocks.enqueue).toHaveBeenCalledExactlyOnceWith("IMG-one");
+  expect(mocks.dispatch).not.toHaveBeenCalled();
+  expect(mocks.after).not.toHaveBeenCalled();
+});
+it("on Cloudflare hands API images to the generation queue", async () => {
+  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
+  mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
+  mocks.get.mockImplementation(async (collection: string) => collection === "models"
+    ? [{ id: "gpt-image-1.5", provider: "openai", sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } }]
+    : { id: "IMG-one", source: "api", status: "queued" });
+  await requestImageAction({ ...request, source: "api", model: "gpt-image-1.5" });
+  expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith("IMG-one");
+  expect(mocks.enqueue).not.toHaveBeenCalled();
+  expect(mocks.after).not.toHaveBeenCalled();
 });
 it("validates provider models before storing keys", async () => {
   mocks.discover.mockResolvedValue([]);
@@ -208,22 +226,6 @@ it("saves pool configuration with validation", async () => {
   ).toBeTruthy();
 });
 
-it("maps non-Error Cloudflare background failures", async () => {
-  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
-  mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
-  mocks.get.mockResolvedValue({ id: "IMG-one", source: "api", status: "queued" });
-  mocks.get.mockImplementation(async (collection: string) => collection === "models"
-    ? [{ id: "gpt-image-1.5", provider: "openai", sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } }]
-    : { id: "IMG-one", source: "api", status: "queued" });
-  await requestImageAction({ ...request, source: "api", model: "gpt-image-1.5" });
-  mocks.enqueue.mockRejectedValue("bad");
-  await mocks.after.mock.calls[0][0]();
-  expect(mocks.put).toHaveBeenCalledWith(
-    "jobs",
-    "IMG-one",
-    expect.objectContaining({ error: "Generation failed" }),
-  );
-});
 it("cancels queued API work without changing the Codex queue", async () => {
   mocks.get.mockResolvedValue({
     id: "IMG-one",
@@ -422,21 +424,6 @@ it("does not expose unexpected storage errors through server actions", async () 
   const result = await createProjectAction({ name: "Error boundary" });
   expect(result?.serverError).toBe("The operation could not be completed. Try again.");
   expect(JSON.stringify(result)).not.toContain("private-action-fixture");
-});
-
-
-it("preserves the safe missing-connection reason on Cloudflare", async () => {
-  vi.stubEnv("IMAGE_QUEUE_STORAGE_DRIVER","cloudflare");
-  mocks.create.mockResolvedValue({ id: "IMG-one", source: "api" });
-  mocks.get.mockImplementation(async (collection: string) => collection === "models"
-    ? [{ id: "gpt-image-1.5", provider: "openai" }]
-    : { id: "IMG-one", source: "api", status: "queued" });
-  await requestImageAction({ ...request, source: "api", model: "gpt-image-1.5" });
-  mocks.enqueue.mockRejectedValue(new UserFacingError("Connect this provider in Settings first"));
-  await mocks.after.mock.calls[0][0]();
-  expect(mocks.put).toHaveBeenCalledWith("jobs", "IMG-one", expect.objectContaining({
-    status: "failed", error: "Connect this provider in Settings first",
-  }));
 });
 
 

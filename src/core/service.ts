@@ -1,3 +1,5 @@
+import { applyVerifiedModelProfiles, assertModelOptions } from "./model-profiles";
+import { assertGifSheetFits } from "./gif-sheet";
 import {waitForLock} from "../storage/wait-for-lock";
 import { configuration } from "./config";
 import { UserFacingError } from "./user-facing-error";
@@ -73,6 +75,10 @@ export class ImageService {
   async create(input: ImageRequest) {
     const parsed = requestSchema.parse(input);
     resolveQueueSize(parsed);
+    if ((parsed.quality !== undefined || parsed.complexity !== undefined) && parsed.source !== "api")
+      throw new UserFacingError("Quality and complexity apply only to API generation. Remove them or use source \"api\".");
+    if ((parsed.outputFormat !== undefined || parsed.frameCount !== undefined || parsed.frameDurationMs !== undefined) && parsed.source !== "api")
+      throw new UserFacingError("Output format and frame settings apply only to API generation. Remove them or use source \"api\".");
     if (!(await this.store.get("projects", parsed.projectId)))
       throw new UserFacingError("Project does not exist");
     if (parsed.topicId) {
@@ -85,20 +91,31 @@ export class ImageService {
     }
     const { idempotencyKey, ...body } = parsed;
     const requestHash = await hash(JSON.stringify(body));
-    const id = `IMG-${idempotencyKey}`;
+    const keyId = `IMG-${idempotencyKey}`;
     const existingRequest = async () => {
-      const existing = await this.store.get<Job>("jobs", id);
+      let id = keyId;
+      let existing = await this.store.get<Job>("jobs", id);
+      if (existing && existing.requestHash !== requestHash && (existing.status === "failed" || existing.status === "cancelled")) {
+        // A request that ended without an image does not hold its key: the corrected
+        // request gets its own ID, which stays idempotent for this key and request.
+        id = `${keyId}-${requestHash.replace(/[^A-Za-z0-9]/g, "").slice(0, 8)}`;
+        existing = await this.store.get<Job>("jobs", id);
+      }
       if (existing && existing.requestHash !== requestHash)
-        throw new UserFacingError("Idempotency key already belongs to a different request");
-      return existing;
+        throw new UserFacingError(
+          `Idempotency key already belongs to a different request (${existing.id}, ${existing.status}). Use a new idempotencyKey for a new or changed request; reuse a key only to repeat the same request.`);
+      return { id, existing };
     };
     // An active provider call holds this record for its entire execution. A replay
     // can return its committed job immediately without waiting for generation.
     const committed=await existingRequest();
-    if(committed)return committed;
-    return waitForLock(this.store,id, async () => {
-      const existing=await existingRequest();
+    if(committed.existing)return committed.existing;
+    return waitForLock(this.store,keyId, async () => {
+      const {id,existing}=await existingRequest();
       if(existing)return existing;
+      // The executor locks a job by its own ID, which differs from the key's ID after a failed request.
+      const underJobLock=<T>(work:()=>Promise<T>)=>id===keyId?work():waitForLock(this.store,id,work,10000);
+      return underJobLock(async () => {
       if (await this.store.get("tombstones", id)) {
         throw new UserFacingError("This request was permanently deleted. Use a new idempotency key for a new request.");
       }
@@ -116,10 +133,18 @@ export class ImageService {
       if (parsed.resolution && (parsed.source !== "api" || parsed.provider !== "google"))
         throw new UserFacingError("Resolution levels require a supported Google image model");
       if (parsed.source === "api") {
-        const models = await this.store.get<Model[]>("models", parsed.provider);
-        const profile = models?.find(model => model.id === parsed.model)?.sizeProfile;
-        if (parsed.resolution && !profile) throw new UserFacingError("The selected model has no resolution profile");
-        if (profile) resolveModelSize(profile, parsed);
+        const stored = (await this.store.get<Model[]>("models", parsed.provider)) ?? [];
+        const storedModel = stored.find(model => model.id === parsed.model);
+        const sizeProfile = storedModel?.sizeProfile;
+        if (parsed.resolution && !sizeProfile) throw new UserFacingError("The selected model has no resolution profile");
+        if (sizeProfile) {
+          const resolved = resolveModelSize(sizeProfile, parsed);
+          const native = /^(\d+)x(\d+)$/.exec(String((resolved.parameters as { size?: string }).size ?? ""));
+          if ((parsed.outputFormat ?? "png") === "gif" && native)
+            assertGifSheetFits(sizeProfile, { width: Number(native[1]), height: Number(native[2]) }, parsed.frameCount);
+        }
+        const profile = applyVerifiedModelProfiles(stored).find(model => model.id === parsed.model);
+        if (profile) assertModelOptions(profile, parsed);
       }
       const now = new Date().toISOString();
       const identity = await createRecordIdentity(this.store, "jobs", id);
@@ -144,6 +169,7 @@ export class ImageService {
         await this.store.put("api-pending", id, { id, createdAt: now });
       await this.store.put("jobs", id, job);
       return job;
+      });
     },10000);
   }
   async retryImage(id: string, acknowledgeUncertain = false) {

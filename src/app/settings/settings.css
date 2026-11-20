@@ -115,7 +115,7 @@
 .settings-list-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; }
 .settings-list-row + .settings-list-row { border-top: 1px solid var(--border); }
 .settings-list-name { font-weight: 500; }
-/* The model count and a connection test result share one cell; a result replaces the count in place. */
+/* The model count and a failed connection test share one cell; an error replaces the count in place. */
 .settings-list-meta { display: grid; flex: 1 1 0; min-width: min(100%, 12rem); line-height: 1.5; overflow-wrap: anywhere; color: var(--muted-fg); }
 .settings-meta-text { grid-area: 1 / 1; }
 .settings-meta-text[data-result] { color: var(--foreground); }
@@ -148,9 +148,7 @@
 }
 .settings-card-footer > [data-slot="button"]:last-child { margin-left: auto; }
 .settings-footer-status { display: grid; gap: 2px; min-width: 0; }
-.settings-footer-hint, .provider-connection-status, .provider-success { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-.settings-footer-hint, .provider-connection-status { color: var(--muted-fg); }
-.provider-success { color: var(--foreground); }
+.settings-footer-hint, .provider-connection-status { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; color: var(--muted-fg); }
 
 /* One control height per card. */
 .settings-card :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="button"]) { height: var(--settings-control); }
@@ -234,6 +232,8 @@
 
 .config-folder-button { justify-self: start; margin-top: 4px; }
 
+/* Numbered steps inside a settings row: the row's hint size, full-contrast text. */
+.settings-steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; list-style: decimal; font-size: 13px; line-height: 1.5; }
 .processing-limits {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));

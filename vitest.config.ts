@@ -4,6 +4,7 @@ export default defineConfig({
   resolve: { alias: {
     "@": fileURLToPath(new URL("./src", import.meta.url)),
     "./.open-next/worker.js": fileURLToPath(new URL("./tests/generated-worker-stub.ts", import.meta.url)),
+    "./.open-next/cloudflare/init.js": fileURLToPath(new URL("./tests/generated-init-stub.ts", import.meta.url)),
   } },
   test: {
     maxWorkers: 4,

@@ -2,7 +2,7 @@
 import { generationPreferenceSchema, saveGenerationPreference } from "@/core/generation-preference";
 import { UserFacingError, publicErrorMessage } from "@/core/user-facing-error";
 import { requireReleaseProvider } from "@/core/release-providers";
-import { applyVerifiedModelProfiles } from "@/core/model-profiles";
+import { applyVerifiedModelProfiles, assertModelOptions } from "@/core/model-profiles";
 import { purgeInput } from "@/core/purge-plan";
 import { retentionInput } from "@/core/retention";
 import { prepareCorrection, workspaceCorrectionSchema } from "@/core/prepare-correction";
@@ -11,13 +11,14 @@ import { pathsSchema, savePaths } from "@/core/paths";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { changeProcessing, processingInput } from "@/core/processing";
-import { after } from "next/server";
 import { createSafeActionClient } from "next-safe-action";
 import { z } from "zod";
 import { verifyAccess } from "@/core/access";
 import { localRequestDenied } from "@/core/local-request";
 import { poolSchema, savePoolConfig } from "@/core/pool";
-import { enqueue, retryBlockedQueueJob, retryImageJob, service } from "@/core/runtime";
+import { requestsForCount } from "@/core/request-count";
+import { dispatch, enqueue, retryBlockedQueueJob, retryImageJob, service } from "@/core/runtime";
+import { configuration } from "@/core/config";
 import { idSchema, projectSchema, requestSchema, retryImageSchema, settingsSchema, type Job, type Model } from "@/core/schema";
 import { saveKey, removeKey, readKey } from "@/core/settings";
 import { reservationRecoveryInput, inspectReservedResult } from "@/core/reservation-recovery";
@@ -35,24 +36,12 @@ const action = createSafeActionClient({
   await verifyAccess(requestHeaders.get("cf-access-jwt-assertion"));
   return next();
 });
-async function submit(job: Job, api: Awaited<ReturnType<typeof service>>) {
-  if (job.source === "queue" || (await import("@/core/config")).configuration("STORAGE_DRIVER") !== "cloudflare") return enqueue(job.id);
-  after(async () => {
-    try {
-      await enqueue(job.id);
-    } catch (error) {
-      await api.store.lock(job.id, async () => {
-        const current = await api.store.get<Job>("jobs", job.id);
-        if (current?.status !== "queued") return;
-        await api.store.put("jobs", job.id, {
-          ...current,
-          status: "failed",
-          error: error instanceof UserFacingError ? error.message : "Generation failed",
-          updatedAt: new Date().toISOString(),
-        });
-      });
-    }
-  });
+async function submit(job: Job, _api?: Awaited<ReturnType<typeof service>>) {
+  // Locally a queue job is appended to the worker queue and a provider job leaves
+  // a durable ticket for the API runner, so both are safe to do in this call.
+  if (job.source === "queue" || configuration("STORAGE_DRIVER") !== "cloudflare") return enqueue(job.id);
+  // Cloudflare runs provider jobs from its generation queue.
+  return dispatch(job.id);
 }
 
 export const createProjectAction = action
@@ -78,23 +67,32 @@ export const generationSourceAction = action
   });
 
 export const requestImageAction = action
-  .inputSchema(requestSchema)
+  .inputSchema(requestSchema.extend({ count: z.number().int().min(1).max(10).optional() }))
   .action(async ({ parsedInput }) => {
+    const { count, ...request } = parsedInput;
+    const expanded = requestsForCount(request, count ?? 1).map(item => requestSchema.parse(item));
     const api = await service();
-    if (parsedInput.source === "api") {
-      requireReleaseProvider(parsedInput.provider);
-      const models = applyVerifiedModelProfiles((await api.store.get<Model[]>("models", parsedInput.provider)) ?? []);
-      const profile = sizeProfileSchema.safeParse(models?.find(model => model.id === parsedInput.model)?.sizeProfile);
-      if (!profile.success)
+    if (request.source === "api") {
+      requireReleaseProvider(request.provider);
+      const models = applyVerifiedModelProfiles((await api.store.get<Model[]>("models", request.provider)) ?? []);
+      const model = models.find(entry => entry.id === request.model);
+      const profile = sizeProfileSchema.safeParse(model?.sizeProfile);
+      if (!model || !profile.success)
         throw new UserFacingError("This model has no valid size profile. Choose another model or refresh its configuration.");
-      resolveModelSize(profile.data, parsedInput);
-      await readKey(api.store, parsedInput.provider);
+      assertModelOptions(model, request);
+      resolveModelSize(profile.data, request);
+      await readKey(api.store, request.provider);
     }
-    if (parsedInput.projectId === "inbox") await api.ensureInbox();
-    const job = await api.create(parsedInput);
-    await submit(job, api);
+    if (request.projectId === "inbox") await api.ensureInbox();
+    const jobs = [];
+    for (const item of expanded) {
+      const job = await api.create(item);
+      await submit(job, api);
+      jobs.push(job);
+    }
     revalidatePath("/");
-    return job;
+    const [first] = jobs;
+    return (count ?? 1) > 1 ? { ...first, jobs } : first;
   });
 export const retryBlockedQueueAction = action
   .inputSchema(z.object({ ids: z.array(idSchema).min(1).max(1000) }))

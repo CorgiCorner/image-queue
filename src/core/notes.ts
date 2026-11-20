@@ -1,6 +1,7 @@
 import { UserFacingError } from "./user-facing-error";
 import { aspectRatios } from "./size-intent";
 import { idSchema } from "./schema";
+import { nextVersionMode } from "./image-format";
 import { createRecordIdentity, type ReplicaIdentity } from "./replica-identity";
 import { z } from "zod";
 import type { Storage } from "../storage/types";
@@ -89,6 +90,20 @@ export async function markNotesSent(
   });
 }
 
+const changesHeader = "Requested changes:";
+
+/**
+ * The prompt of a version that is generated again rather than edited: the earlier
+ * prompt with the requested changes listed under it. A later version adds to the
+ * same list, so every change asked for so far stays in force.
+ */
+export function revisedPrompt(prompt: string, changes: string[]) {
+  const at = prompt.lastIndexOf(`\n\n${changesHeader}\n`);
+  const earlier = at < 0 ? 0 : prompt.slice(at).split("\n").filter(line => /^\d+\. /.test(line)).length;
+  const list = changes.map((change, index) => `${earlier + index + 1}. ${change.replace(/\s*\n\s*/g, " ")}`).join("\n");
+  return at < 0 ? `${prompt}\n\n${changesHeader}\n${list}` : `${prompt}\n${list}`;
+}
+
 export async function createCorrection(
   api: import("./service").ImageService,
   input: {
@@ -134,8 +149,10 @@ export async function createCorrection(
     const notes = input.noteIds
       ? input.noteIds.flatMap(id => availableNotes.filter(note => note.id === id))
       : availableNotes;
+    // An animation has no reference: its next version is generated again from its prompt.
+    const regenerate = nextVersionMode(original) === "regenerate";
     if (
-      input.referenceIds.length !== (input.originalOnly ? 1 : 2) ||
+      input.referenceIds.length !== (regenerate ? 0 : input.originalOnly ? 1 : 2) ||
       new Set(input.referenceIds).size !== input.referenceIds.length
     )
       throw new UserFacingError("Duplicate or missing correction references");
@@ -210,12 +227,14 @@ export async function createCorrection(
     const request = intent?.request ?? {
       projectId: original.projectId,
       topicId: original.topicId,
-      prompt: [
-        ...selectedNotes.map((note, index) => `${index + 1}. ${note.text}`),
-        instruction,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
+      prompt: regenerate
+        ? revisedPrompt(original.prompt, [...selectedNotes.map(note => note.text), instruction].filter(Boolean))
+        : [
+          ...selectedNotes.map((note, index) => `${index + 1}. ${note.text}`),
+          instruction,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       source: correctionSource,
       provider: input.generation?.provider ?? original.provider,
       model: input.generation?.model ?? original.model,
@@ -226,14 +245,20 @@ export async function createCorrection(
       width: original.width,
       height: original.height,
       transparent,
+      ...(regenerate ? {
+        quality: original.quality, complexity: original.complexity, outputFormat: original.outputFormat,
+        frameCount: original.frameCount, frameDurationMs: original.frameDurationMs,
+      } : {}),
       referenceIds: input.referenceIds,
       idempotencyKey: input.idempotencyKey,
     };
+    if (request.prompt.length > 12000)
+      throw new UserFacingError("The prompt with these changes is too long. Shorten the changes.");
     if (request.source === "api") {
       const { applyVerifiedModelProfiles } = await import("./model-profiles");
       const models = await api.store.get<import("./schema").Model[]>("models", request.provider);
       const profile = applyVerifiedModelProfiles(models ?? []).find(model => model.id === request.model);
-      if (profile && !profile.references)
+      if (profile && request.referenceIds.length && !profile.references)
         throw new UserFacingError("Choose a model that supports reference images.");
       if (profile && request.transparent && !profile.transparency)
         throw new UserFacingError("This image has transparency. Choose a source that supports transparent images.");
