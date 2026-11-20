@@ -40,7 +40,8 @@ for (const driver of ["disk", "memory", "cloudflare"]) {
       disposables.push(async () => disallowLoopback());
       const proxy = await getPlatformProxy<Bindings>({ configPath, persist: false, remoteBindings: false });
       disposables.push(() => proxy.dispose());
-      await proxy.env.DB.exec((await readFile("migrations/0001.sql", "utf8")).trim());
+      for (const migration of ["0001.sql", "0002.sql"])
+        await proxy.env.DB.exec((await readFile(`migrations/${migration}`, "utf8")).trim());
       return new CloudflareStorage(proxy.env.DB, proxy.env.BUCKET);
     }
     it("round-trips records and isolates returned values", async () => {

@@ -1,3 +1,4 @@
+import { nextVersionMode, referenceFormatError } from "./image-format";
 import { UserFacingError } from "./user-facing-error";
 import { z } from "zod";
 import { idSchema, requestSchema, type Job } from "./schema";
@@ -45,12 +46,23 @@ export async function prepareCorrection(api: ImageService, input: z.input<typeof
     const job = await api.store.get<Job>("jobs", value.imageId);
     if (!job || job.trashedAt || job.archivedAt || job.status !== "done")
       throw new UserFacingError("A ready, active image is required");
+    // An animation is generated again from its prompt, so it needs no references.
+    const regenerate = nextVersionMode(job) === "regenerate";
+    const referenceError = regenerate ? undefined : referenceFormatError(job.outputFormat);
+    if (referenceError) throw new UserFacingError(referenceError);
     if ((value.generation?.source ?? (job.imported ? "queue" : job.source)) === "api") {
       if (!(value.generation?.model ?? job.model)) throw new UserFacingError("Choose an available image model");
       await readKey(api.store, value.generation?.provider ?? job.provider);
     }
     const notes = saved?.notes ?? (await api.store.list<ImageNote>("notes")).filter(note => note.imageId === job.id && !note.sentInJobId).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     if (!notes.length && !value.instruction) throw new UserFacingError("Add an unsent note first");
+    if (regenerate) {
+      const noteIds = notes.map(note => note.id);
+      if (!saved?.notes) await api.store.put("prepared-corrections", value.idempotencyKey, {
+        id: value.idempotencyKey, imageId: value.imageId, instruction: value.instruction, referenceIds: [], noteIds, notes, signature,
+      });
+      return createCorrection(api, { ...value, referenceIds: [], noteIds, noteSnapshot: notes });
+    }
     let blob = job.blobKey ? await api.store.getBlob(job.blobKey) : undefined;
     if (!blob && job.source === "queue") {
       const { queueOutput, configuredQueueRoot } = await import("../sources/queue");

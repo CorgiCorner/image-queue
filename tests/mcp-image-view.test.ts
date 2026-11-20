@@ -10,6 +10,12 @@ vi.mock("../src/mcp/views/compact-app", () => ({
     constructor() { bridge.app = this; }
   }, applyDocumentTheme: vi.fn(), applyHostStyleVariables: vi.fn(),
 }));
+// A preview asks the app-only tool first, so the resource fallback starts a few microtasks later.
+async function settle() {
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+}
+/** Calls a view made for anything other than loading its preview. */
+const actionCalls = () => bridge.app.callServerTool.mock.calls.filter(([request]: [{ name: string }]) => request.name !== "read_thumbnail");
 it("renders notes safely and switches versions by record identifier", async () => {
   document.body.innerHTML = '<p role="status"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes">Add to queue</button>';
   await import("../src/mcp/views/image");
@@ -61,13 +67,45 @@ it("positions saved note pins and focuses the matching note", async () => {
   await bridge.app.onteardown();
 });
 
+it.each([
+  { source: "the app-only tool", tool: { content: [{ type: "image", mimeType: "image/webp", data: "dG9vbA==" }] }, src: "data:image/webp;base64,dG9vbA==", reads: 0 },
+  { source: "the resource after the tool fails", tool: { isError: true, content: [{ type: "text", text: "Image is unavailable" }] }, src: "data:image/webp;base64,cmVzb3VyY2U=", reads: 1 },
+])("loads the preview from $source", async ({ tool, src, reads }) => {
+  vi.resetModules();
+  document.body.innerHTML = '<p role="status"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes">Add to queue</button>';
+  await import("../src/mcp/views/image");
+  bridge.app.callServerTool.mockResolvedValue(tool);
+  bridge.app.readServerResource.mockResolvedValue({ contents: [{ mimeType: "image/webp", blob: "cmVzb3VyY2U=" }] });
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done" }, notes: [], versions: [] }) }] });
+  await settle();
+  expect(bridge.app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "one" } });
+  expect(document.querySelector<HTMLImageElement>("#preview")!.src).toBe(src);
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Ready");
+  expect(bridge.app.readServerResource).toHaveBeenCalledTimes(reads);
+  await bridge.app.onteardown();
+});
+
+it("reports an unavailable preview only after the tool and the resource both fail", async () => {
+  vi.resetModules();
+  document.body.innerHTML = '<p role="status"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes">Add to queue</button>';
+  await import("../src/mcp/views/image");
+  bridge.app.callServerTool.mockRejectedValue(new Error("Unknown tool"));
+  bridge.app.readServerResource.mockRejectedValue(new Error("Resource unavailable"));
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done" }, notes: [], versions: [] }) }] });
+  await settle();
+  expect(bridge.app.readServerResource).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Preview unavailable");
+  expect(document.querySelector<HTMLImageElement>("#preview")!.hasAttribute("src")).toBe(false);
+  await bridge.app.onteardown();
+});
+
 it("shows pins after preview load and hides them on decode failure", async () => {
   vi.resetModules();
   document.body.innerHTML = '<p role="status"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes">Add to queue</button>';
   await import("../src/mcp/views/image");
   bridge.app.readServerResource.mockResolvedValue({ contents: [{ mimeType: "image/png", blob: "YWJj" }] });
   bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done" }, notes: [{ text: "Change sky", x: 0.2, y: 0.3 }], versions: [] }) }] });
-  await Promise.resolve();
+  await settle();
   const preview = document.querySelector<HTMLImageElement>("#preview")!;
   const pins = document.querySelector<HTMLElement>("#pins")!;
   preview.dispatchEvent(new Event("load"));
@@ -248,7 +286,7 @@ it("queues corrections only on click and reuses the key after failure", async ()
   document.body.innerHTML = '<p role="status"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes">Add to queue</button>';
   await import("../src/mcp/views/image");
   bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done" }, notes: [{ text: "Fix" }], versions: [] }) }] });
-  expect(bridge.app.callServerTool).not.toHaveBeenCalled();
+  expect(actionCalls()).toEqual([]);
   bridge.app.callServerTool
     .mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "Choose an available image model" }] })
     .mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "Internal file path" }] });
@@ -259,8 +297,8 @@ it("queues corrections only on click and reuses the key after failure", async ()
   expect(status.textContent).toBe("Connect the original image model in Settings, then retry this correction.");
   button.click();
   await Promise.resolve();
-  expect(status.textContent).toBe("Could not queue correction. Retry to check the same request.");
-  const calls = bridge.app.callServerTool.mock.calls;
+  expect(status.textContent).toBe("Could not request the next version. Retry to check the same request.");
+  const calls = actionCalls();
   expect(calls).toHaveLength(2);
   expect(calls[0][0].name).toBe("add_notes_to_queue");
   expect(calls[0][0].arguments).toEqual(calls[1][0].arguments);
@@ -275,10 +313,10 @@ it("keeps an unsaved note when the user requests a correction", async () => {
   const text = document.querySelector<HTMLTextAreaElement>("#note-text")!;
   text.value = "Unsaved instruction";
   document.querySelector<HTMLButtonElement>("#queue-notes")!.click();
-  expect(bridge.app.callServerTool).not.toHaveBeenCalled();
+  expect(actionCalls()).toEqual([]);
   expect(text.value).toBe("Unsaved instruction");
   expect(document.activeElement).toBe(text);
-  expect(document.querySelector('[role="status"]')?.textContent).toContain("Save your note");
+  expect(document.querySelector('[role="status"]')?.textContent).toContain("Save your change");
   await bridge.app.onteardown();
 });
 
@@ -294,7 +332,7 @@ it.each([
   const button = document.querySelector<HTMLButtonElement>("#queue-notes")!;
   expect(button.disabled).toBe(true);
   button.click();
-  expect(bridge.app.callServerTool).not.toHaveBeenCalled();
+  expect(actionCalls()).toEqual([]);
   await bridge.app.onteardown();
 });
 
@@ -310,9 +348,9 @@ it("refreshes sent notes and disables resubmission after a successful correction
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
-  expect(bridge.app.callServerTool).toHaveBeenLastCalledWith({ name: "get_image_details", arguments: { id: "one" } });
+  expect(actionCalls().at(-1)).toEqual([{ name: "get_image_details", arguments: { id: "one" } }]);
   expect(button.disabled).toBe(true);
-  expect(document.querySelector('[role="status"]')?.textContent).toBe("Correction added to queue.");
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Next version requested.");
   await bridge.app.onteardown();
 });
 
@@ -368,7 +406,7 @@ it("does not overwrite a newer image with an old correction confirmation", async
   await Promise.resolve();
   await Promise.resolve();
   expect(document.querySelector("#notes")?.textContent).toBe("two");
-  expect(document.querySelector('[role="status"]')?.textContent).not.toBe("Correction added to queue.");
+  expect(document.querySelector('[role="status"]')?.textContent).not.toBe("Next version requested.");
   await bridge.app.onteardown();
 });
 
@@ -405,7 +443,7 @@ it("keeps an unchanged image and notes mounted and reuses pixels after a note ed
  app.readServerResource.mockResolvedValue({contents:[{blob:"YWJj",mimeType:"image/png"}]});
  const data={image:{id:"stable",status:"done",prompt:"Image"},notes:[{text:"First"}],versions:[{id:"stable"}]};
  const send=(value:unknown)=>app.ontoolresult({content:[{text:JSON.stringify(value)}]});
- send(data);await Promise.resolve();await Promise.resolve();
+ send(data);await settle();
  const preview=document.querySelector<HTMLImageElement>('#preview')!,note=document.querySelector('#notes li');
  const src=preview.src;
  const version=document.querySelector('#versions button');
@@ -421,4 +459,96 @@ it("keeps an unchanged image and notes mounted and reuses pixels after a note ed
  expect(document.querySelector('#notes li')).toBe(updatedNote);
  expect(document.querySelectorAll('#versions button')).toHaveLength(2);
  await app.onteardown();
+});
+
+const phoneBody = '<p role="status"></p><p id="source"></p><img id="preview"><div id="pins"></div><span id="draft-point" hidden></span><button id="clear-point" hidden>Clear point</button><ol id="notes"></ol><nav id="versions"></nav><form id="note-form"><textarea id="note-text"></textarea><button id="save-note">Save note</button></form><button id="queue-notes" hidden>Add to queue</button>';
+
+it("lets a finger scroll across the image without dropping a point, and marks a point on a tap", async () => {
+  vi.resetModules();
+  document.body.innerHTML = phoneBody;
+  await import("../src/mcp/views/image");
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "queued" }, notes: [], versions: [] }) }] });
+  const preview = document.querySelector<HTMLImageElement>("#preview")!;
+  preview.hidden = false;
+  preview.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 200 } as DOMRect);
+  preview.setPointerCapture = vi.fn();
+  const draft = document.querySelector<HTMLElement>("#draft-point")!;
+  const down = new PointerEvent("pointerdown", { pointerId: 1, pointerType: "touch", button: 0, clientX: 100, clientY: 150, cancelable: true });
+  preview.dispatchEvent(down);
+  expect(down.defaultPrevented).toBe(false);
+  expect(preview.setPointerCapture).not.toHaveBeenCalled();
+  preview.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 60 }));
+  preview.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 60 }));
+  expect(draft.hidden).toBe(true);
+  preview.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 2, pointerType: "touch", button: 0, clientX: 100, clientY: 150 }));
+  preview.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 2, pointerType: "touch" }));
+  expect(draft.hidden).toBe(true);
+  preview.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 3, pointerType: "touch", button: 0, clientX: 50, clientY: 150 }));
+  preview.dispatchEvent(new PointerEvent("pointerup", { pointerId: 3, pointerType: "touch", clientX: 53, clientY: 152 }));
+  expect(draft.hidden).toBe(false);
+  expect(draft.style.left).toBe("25%");
+  expect(draft.style.top).toBe("75%");
+  await bridge.app.onteardown();
+});
+
+it("names the status and source like the request view, plays a GIF and hides controls with nothing to do", async () => {
+  vi.resetModules();
+  document.body.innerHTML = phoneBody;
+  await import("../src/mcp/views/image");
+  bridge.app.callServerTool.mockResolvedValue({ content: [{ type: "image", data: "R0lG", mimeType: "image/webp" }, { type: "text", text: '{"animated":true}' }] });
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done", source: "api", provider: "openai", model: "gpt-image-2.6-sunburst", outputFormat: "gif" }, notes: [], versions: [{ id: "one", versionNumber: 1 }] }) }] });
+  await settle();
+  expect(document.querySelector('[role="status"]')!.textContent).toBe("Ready");
+  expect(document.querySelector("#source")!.textContent).toBe("OpenAI · gpt-image-2.6-sunburst");
+  expect(bridge.app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "one", animated: true } });
+  expect(document.querySelector<HTMLElement>("#versions")!.hidden).toBe(true);
+  expect(document.querySelector<HTMLElement>("#queue-notes")!.hidden).toBe(true);
+  await bridge.app.onteardown();
+});
+
+const formBody = phoneBody.replace('<form id="note-form">', '<p id="no-corrections" hidden></p><form id="note-form"><p id="note-hint"></p>').replace('<ol id="notes">', '<div class="saved"><ol id="notes">') + "</div>";
+
+it("offers no changes for an image that has no next version, and brings the form back for one that has", async () => {
+  vi.resetModules();
+  document.body.innerHTML = formBody;
+  await import("../src/mcp/views/image");
+  bridge.app.callServerTool.mockResolvedValue({ content: [{ type: "image", data: "R0lG", mimeType: "image/webp" }] });
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done", outputFormat: "svg", nextVersion: "none" }, notes: [{ text: "Earlier note", x: 0.5, y: 0.5 }], versions: [] }) }] });
+  await settle();
+  expect(document.querySelector("#pins")!.childElementCount).toBe(0);
+  expect(document.querySelector<HTMLElement>("#note-form")!.hidden).toBe(true);
+  expect(document.querySelector<HTMLElement>(".saved")!.hidden).toBe(true);
+  expect(document.querySelector<HTMLElement>("#no-corrections")!.hidden).toBe(false);
+  document.querySelector<HTMLButtonElement>("#queue-notes")!.click();
+  expect(actionCalls()).toEqual([]);
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "two", status: "done", outputFormat: "png", nextVersion: "edit" }, notes: [], versions: [] }) }] });
+  expect(document.querySelector<HTMLElement>("#note-form")!.hidden).toBe(false);
+  expect(document.querySelector<HTMLElement>("#no-corrections")!.hidden).toBe(true);
+  expect(document.querySelector("#note-hint")!.textContent).toContain("tap that place on the image");
+  await bridge.app.onteardown();
+});
+
+it("takes changes for an animation without letting the image be tapped, and requests the next version", async () => {
+  vi.resetModules();
+  document.body.innerHTML = formBody;
+  await import("../src/mcp/views/image");
+  bridge.app.callServerTool.mockResolvedValue({ content: [{ type: "image", data: "R0lG", mimeType: "image/webp" }] });
+  bridge.app.ontoolresult({ content: [{ text: JSON.stringify({ image: { id: "one", status: "done", outputFormat: "gif", nextVersion: "regenerate" }, notes: [{ text: "Fluffier tail" }], versions: [] }) }] });
+  await settle();
+  expect(document.querySelector<HTMLElement>("#note-form")!.hidden).toBe(false);
+  expect(document.querySelector<HTMLElement>("#no-corrections")!.hidden).toBe(true);
+  expect(document.querySelector("#note-hint")!.textContent).toContain("whole animation again");
+  const preview = document.querySelector<HTMLImageElement>("#preview")!;
+  preview.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 200 } as DOMRect);
+  preview.setPointerCapture = vi.fn();
+  preview.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, button: 0, clientX: 50, clientY: 50 }));
+  preview.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, clientX: 50, clientY: 50 }));
+  expect(document.querySelector<HTMLElement>("#draft-point")!.hidden).toBe(true);
+  const button = document.querySelector<HTMLButtonElement>("#queue-notes")!;
+  expect(button.hidden).toBe(false);
+  expect(button.disabled).toBe(false);
+  button.click();
+  await Promise.resolve();
+  expect(actionCalls()[0][0]).toMatchObject({ name: "add_notes_to_queue", arguments: { imageId: "one" } });
+  await bridge.app.onteardown();
 });

@@ -9,7 +9,7 @@ Use the connected image-queue MCP tools. Tool namespaces may vary; discover the 
 
 ## Choose the source deliberately
 
-Read `get_generation_source` and `list_models` before the first request when the source or model is not already known in this conversation.
+Read `get_generation_source` and `list_models` before the first request when the source or model is not already known in this conversation. If `list_models` is empty or lacks a model the user names, call `refresh_models` once; it generates nothing and is not billed. A hosted (Cloudflare) server always uses source `api`. After a job is `done`, call `view_image` to show it when the client has no inline views.
 
 - `queue` means the local Codex runner using the ChatGPT plan. It requires the machine and runner to be available. A queued request is not proof that generation has started.
 - `api` means a separately billed OpenAI API call using the locally configured key. A working ChatGPT plan does not provide API credit.
@@ -22,7 +22,7 @@ Changing a setting alone is not approval for extra generations. Submit the image
 
 ## Prepare an accurate request
 
-Choose the intended project from `list_projects`. Read available models and their supported options rather than guessing dimensions or capabilities. For queue requests use the requested `aspectRatio`, or exact `width` and `height` when the user needs them. For API requests use the returned verified size profile. The final image may be fitted down from a supported provider size; do not promise a native size or invent support for transparency.
+Choose the intended project from `list_projects`. Read available models and their supported options rather than guessing dimensions or capabilities. For queue requests use the requested `aspectRatio`, or exact `width` and `height` when the user needs them. For API requests use the returned size profile, `transparency`, `qualities`, `complexities` and `outputFormats`; pass `quality`, `complexity` or `outputFormat` only for API requests and only with a listed value. Omit `outputFormat` for PNG. Transparent output is PNG or WebP only. GIF may set `frameCount` (2–16) and `frameDurationMs` (20–2000). SVG cannot include reference images or frame settings. GIF output with reference images is not supported by this application yet. `count` (1–10) creates that many independent jobs; replay the same idempotency key and count to get the same jobs. `request_images` counts the expanded jobs toward 20. Capabilities under `documentedOnly`, and every capability of a model with `generationVerified: false`, come from provider documentation without a generation receipt: check the delivered file. The final raster may be fitted down from a supported provider size; GIF keeps its animation when fitting is possible, and SVG is stored as generated. Do not promise a native size or invent support for transparency.
 
 Keep the user's prompt literal. Add style instructions only when requested or approved. Do not silently shorten or rewrite a failed prompt to get a different result. Keep provider-native controls separate from prompt text.
 

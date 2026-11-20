@@ -351,6 +351,20 @@ it("imports images through the same-origin endpoint", async () => {
   ).toBe(403);
 });
 
+it("serves SVG with a locked-down content security policy", async () => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="red"/></svg>`;
+  mocks.store.get.mockImplementation(async (collection: string) => collection === "jobs"
+    ? { id: "vector", status: "done", blobKey: "results/vector", source: "api" }
+    : undefined);
+  mocks.store.getBlob.mockResolvedValue({ bytes: new TextEncoder().encode(svg), mime: "image/svg+xml" });
+  const response = await asset(new Request("http://localhost/api/asset?job=vector"));
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("image/svg+xml");
+  expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; sandbox");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(await response.text()).toBe(svg);
+});
+
 it("serves a retained blocked output and rejects blocked jobs without a file", async () => {
   mocks.store.get.mockImplementation(async (collection: string) => collection === "jobs"
     ? { id: "retained", status: "blocked", blobKey: "results/retained" }

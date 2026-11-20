@@ -1,3 +1,5 @@
+import { ImageRequestError, readProviderError } from "../core/api-rejection";
+import { mimeForDetectedType, outputMime, svgDocument } from "../core/image-format";
 import { UserFacingError } from "../core/user-facing-error";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createGateway } from "@ai-sdk/gateway";
@@ -117,9 +119,24 @@ export async function generate(
       : job.provider === "google"
         ? { aspectRatio: `${job.width / gcd(job.width, job.height)}:${job.height / gcd(job.width, job.height)}` }
         : { size: `${job.width}x${job.height}` };
+  if ((job.quality || job.complexity) && job.provider !== "openai")
+    throw new UserFacingError("Quality and complexity settings require an OpenAI image model");
+  if (job.outputFormat === "svg")
+    return generateSvg(job, key, sizeParameters.size, references.length);
+  if ((job.outputFormat || job.frameCount !== undefined || job.frameDurationMs !== undefined) && job.provider !== "openai")
+    throw new UserFacingError("Output format and frame settings require an OpenAI image model");
+  const rasterFormat = job.outputFormat;
+  const openaiOptions = {
+    ...(job.transparent ? { background: "transparent" as const, outputFormat: rasterFormat ?? "png" as const } : {}),
+    ...(!job.transparent && rasterFormat ? { outputFormat: rasterFormat } : {}),
+    ...(job.quality ? { quality: job.quality } : {}),
+    ...(job.complexity ? { complexity: job.complexity } : {}),
+    ...(rasterFormat === "gif" && job.frameCount !== undefined ? { frameCount: job.frameCount } : {}),
+    ...(rasterFormat === "gif" && job.frameDurationMs !== undefined ? { frameDurationMs: job.frameDurationMs } : {}),
+  };
   const providerOptions: Parameters<typeof generateImage>[0]["providerOptions"] = job.resolution && job.provider === "google"
     ? { google: { imageConfig: { imageSize: job.resolution } } }
-    : job.transparent ? { openai: { background: "transparent" } } : undefined;
+    : Object.keys(openaiOptions).length ? { openai: openaiOptions } : undefined;
   const result = await generateImage({
     model,
     prompt: references.length
@@ -132,22 +149,120 @@ export async function generate(
     providerOptions,
   });
   const generatedDimensions = imageSize(result.image.uint8Array);
-  let output = { bytes: result.image.uint8Array, mime: result.image.mediaType };
+  let bytes = result.image.uint8Array;
+  let mime = mimeOf(bytes);
   let adaptationError: string | undefined;
-  if (sizeProfile && job.exactDimensions !== false && (generatedDimensions.width !== job.width || generatedDimensions.height !== job.height)) {
+  const needsFit = Boolean(sizeProfile && job.exactDimensions !== false && (generatedDimensions.width !== job.width || generatedDimensions.height !== job.height));
+  const fitFailure = (error: unknown) => error instanceof UserFacingError
+    ? `The generated image was saved. ${error.message}`
+    : "The generated image was saved, but could not be fitted to the requested dimensions without upscaling.";
+  if (rasterFormat) {
+    const requestedMime = outputMime[rasterFormat];
+    if (mime !== requestedMime)
+      adaptationError = `The generated image was saved. The provider returned ${mime} instead of the requested ${rasterFormat} output.`;
+    else if (needsFit) {
+      const { fitImage } = await import("./image-fit");
+      try {
+        const fitted = await fitImage(bytes, { width: job.width, height: job.height }, rasterFormat);
+        bytes = fitted.bytes;
+        mime = mimeOf(bytes);
+        if (mime !== requestedMime)
+          adaptationError = `The generated image was saved. The provider returned ${mime} instead of the requested ${rasterFormat} output.`;
+      } catch (error) {
+        adaptationError = fitFailure(error);
+      }
+    }
+  } else if (needsFit) {
     const { fitImage } = await import("./image-fit");
     try {
-      output = await fitImage(output.bytes, { width: job.width, height: job.height });
+      const fitted = await fitImage(bytes, { width: job.width, height: job.height }, "png");
+      bytes = fitted.bytes;
+      mime = outputMime.png;
     } catch (error) {
-      adaptationError = error instanceof UserFacingError ? `The generated image was saved. ${error.message}` : "The generated image was saved, but could not be fitted to the requested dimensions without upscaling.";
+      adaptationError = fitFailure(error);
     }
   }
   return {
-    ...imageSize(output.bytes),
-    ...output,
+    ...imageSize(bytes),
+    bytes,
+    mime,
     generatedDimensions,
     adaptationError,
     usage: result.usage,
+  };
+}
+
+/** Prefer the bytes over the provider's declared media type. */
+function mimeOf(bytes: Uint8Array) {
+  let detected: string | undefined;
+  try { detected = mimeForDetectedType(imageSize(bytes).type); } catch { detected = undefined; }
+  if (detected) return detected;
+  if (svgDocument(bytes)) return outputMime.svg;
+  throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+}
+
+/** SVG is rejected by the installed SDK schema, and the edits endpoint cannot return it. */
+async function generateSvg(job: Job, key: string, size: `${number}x${number}` | undefined, referenceCount: number) {
+  if (job.provider !== "openai")
+    throw new UserFacingError("SVG output requires an OpenAI image model");
+  if (referenceCount)
+    throw new UserFacingError("SVG output cannot be combined with reference images.");
+  if (!size) throw new UserFacingError("SVG output requires a pixel size.");
+  const [width, height] = size.split("x").map(Number);
+  if (!width || !height) throw new UserFacingError("SVG output requires a pixel size.");
+  const body = {
+    model: job.model,
+    prompt: job.prompt,
+    n: 1,
+    size,
+    output_format: "svg",
+    ...(job.quality ? { quality: job.quality } : {}),
+    ...(job.complexity ? { complexity: job.complexity } : {}),
+    ...(job.transparent ? { background: "transparent" } : {}),
+  };
+  const response = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(240000),
+  }).catch(() => {
+    throw new UserFacingError("Could not reach the provider. Check your connection and try again.");
+  });
+  if (response.status === 401)
+    throw new ImageRequestError(401, "The provider rejected this API key (401). Check the key and try again.");
+  if (response.status === 403)
+    throw new ImageRequestError(403, "This API key cannot generate images (403). Check its permissions.");
+  if (!response.ok)
+    throw new ImageRequestError(
+      response.status,
+      `The provider rejected image generation (${response.status}).`,
+      await readProviderError(response),
+    );
+  const payload = await response.json().catch(() => {
+    throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+  });
+  const parsed = z.object({
+    data: z.array(z.object({ b64_json: z.string().min(1) })).min(1),
+  }).safeParse(payload);
+  if (!parsed.success)
+    throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(parsed.data.data[0].b64_json);
+    bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+  } catch {
+    throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+  }
+  if (!bytes.length || !svgDocument(bytes))
+    throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+  return {
+    bytes,
+    mime: outputMime.svg,
+    width,
+    height,
+    generatedDimensions: { width, height },
+    adaptationError: undefined,
+    usage: undefined,
   };
 }
 

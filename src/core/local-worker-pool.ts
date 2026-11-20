@@ -88,7 +88,8 @@ export class LocalWorkerPool<T extends LocalWork> {
         catch (persistError) { this.ports.report(persistError); }
         this.ports.report(saveError);
       }
-      if (!begun) this.ports.report(error);
+      // The UI shows a safe summary; the local log keeps the cause for diagnosis.
+      this.ports.report(error);
     } finally {
       this.active.delete(job.id);
       this.wake();

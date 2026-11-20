@@ -82,6 +82,17 @@ Choose the default for new requests in **Settings → Default source**, or use M
 
 The optional [image-queue skill](skills/image-queue/SKILL.md) explains references, source selection and error recovery for agents. Reference images must be PNG, JPEG or WebP; style documents belong in text instructions. Before retrying an uncertain result, inspect the retained output and the recovery details returned by MCP.
 
+### Use it from your phone: deploy to Cloudflare
+
+You can also run your own private copy on Cloudflare and add it as a remote MCP server in the Claude apps (web, desktop and phone), Claude Code or Codex. Cloudflare Access protects the panel and the MCP endpoint, and generation uses your image API key. It costs 5 USD per month for Workers Paid plus API usage. `pnpm cloudflare:setup --domain app.example.com --email you@example.com` sets everything up; see [Cloudflare deployment](docs/cloudflare.md).
+
+```sh
+claude mcp add --transport http image-queue https://app.example.com/api/mcp
+codex mcp add image-queue --url https://app.example.com/api/mcp && codex mcp login image-queue
+```
+
+In claude.ai or Claude Desktop, add the same URL under **Settings → Connectors → Add custom connector**; it also appears in the Claude mobile app.
+
 ### Set up with an agent
 
 Give a local agent terminal access to the folder where you want image-queue, then paste:
@@ -121,11 +132,12 @@ The supported deployment is local on macOS (Apple silicon). Cloudflare deploymen
 - Only models with a verified size profile appear in the model list.
 - References: PNG, JPEG or WebP, up to 20 MB.
 - Interrupted paid requests are not retried automatically.
+- The Cloudflare deployment runs API generation only; the Codex queue stays local.
 - Not included yet: multi-machine sync, video, Windows and Linux support.
 - Some OpenAI accounts need [organization verification](https://developers.openai.com/api/docs/guides/image-generation) before using image models.
 
 ## More
 
-[Configuration](docs/configuration.md) · [Codex workers](docs/codex-workers.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+[Configuration](docs/configuration.md) · [Cloudflare deployment](docs/cloudflare.md) · [Codex workers](docs/codex-workers.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 Licensed under [Apache 2.0](LICENSE).

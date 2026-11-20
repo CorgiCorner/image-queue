@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { APICallError } from "ai";
 import { png, mp4 } from "./fixtures";
 import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { jobRecovery } from "../src/core/job-recovery";
 import { importExistingQueue } from "../src/core/import-queue";
 import { executeImageJob, refreshedJobs, retryBlockedQueueJob, retryImageJob, service } from "../src/core/runtime";
 import type { Job } from "../src/core/schema";
@@ -19,6 +21,7 @@ vi.mock("../src/core/model-profiles", async (importOriginal) => {
     actual.applyVerifiedModelProfiles(models.map(model => model.id === "gpt-image-test" ? {...model, provider: "openai" as const} : model), models.filter(model => model.id === "gpt-image-test" && actual.verifiedModelProfileSchema.shape.sizeProfile.safeParse(model.sizeProfile).success).map(model => ({
       provider: "openai" as const, model: "gpt-image-test", sizeProfile: model.sizeProfile!,
       references: model.references, transparency: model.transparency,
+      qualities: ["low", "medium", "high", "auto"], complexities: [], outputFormats: ["png", "webp", "jpeg", "gif", "svg"], documentedOnly: [],
       documentation: "https://example.com/fixture", verifiedAt: "2026-11-15T00:00:00Z",
       evidence: { generation: "fixture", referenceEdit: "fixture" },
     })))
@@ -64,6 +67,32 @@ afterEach(async () => {
     usage: {},
   } as never);
 });
+function apiError(statusCode: number, body: unknown) {
+  return new APICallError({
+    message: "do-not-store-sdk-message-sentinel",
+    url: "https://api.openai.com/v1/images/generations",
+    requestBodyValues: { secret: "do-not-store-request-body-sentinel" },
+    responseHeaders: { authorization: "Bearer do-not-store-header-sentinel" },
+    statusCode,
+    responseBody: JSON.stringify(body),
+  });
+}
+function hidesSecrets(job: Job) {
+  const serialized = JSON.stringify(job);
+  expect(serialized).not.toContain("do-not-store");
+  expect(serialized).not.toContain("Bearer");
+  expect(serialized).not.toContain("test-key");
+}
+async function failApi(error: unknown) {
+  const job = await make("api");
+  process.env.OPENAI_API_KEY = "test-key";
+  await store.put("models", "openai", [
+    { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
+  ]);
+  vi.mocked(generate).mockRejectedValueOnce(error);
+  await execute(job.id);
+  return (await store.get<Job>("jobs", job.id))!;
+}
 async function make(source: "queue" | "api" = "queue") {
   const p = await api.createProject("Test");
   return api.create({
@@ -203,6 +232,56 @@ describe("runtime", () => {
     const digest = createHash("sha256").update(bytes).digest("hex");
     expect(saved?.blobKey).toBe(`results/${digest}`);
     expect(await store.getBlob(`results/${digest}`)).toEqual({ bytes, mime: "image/png" });
+    expect(JSON.parse(saved!.provenance!).outputFormat).toBe("png");
+  });
+  it("stores each requested API format and records it in provenance", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    await store.put("models", "openai", [{
+      id: "gpt-image-test", references: false, transparency: true,
+      sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] },
+    }]);
+    const { outputMime, extensionForOutputFormat } = await import("../src/core/image-format");
+    for (const format of ["png", "webp", "jpeg", "gif", "svg"] as const) {
+      const bytes = Uint8Array.of(format.length);
+      vi.mocked(generate).mockResolvedValueOnce({ bytes, mime: outputMime[format], width: 1024, height: 1024, usage: {} } as never);
+      const project = await api.createProject(format);
+      const job = await api.create({
+        projectId: project.id, idempotencyKey: format, prompt: "Painted panda", source: "api",
+        provider: "openai", model: "gpt-image-test", width: 1024, height: 1024,
+        transparent: false, referenceIds: [], outputFormat: format,
+        ...(format === "gif" ? { frameCount: 6, frameDurationMs: 100 } : {}),
+      });
+      await execute(job.id);
+      const saved = await store.get<Job>("jobs", job.id);
+      const provenance = JSON.parse(saved!.provenance!);
+      expect(saved?.status).toBe("done");
+      expect(provenance.outputFormat).toBe(format);
+      if (format === "gif") expect(provenance).toMatchObject({ frameCount: 6, frameDurationMs: 100 });
+      expect(await store.getBlob(saved!.blobKey!)).toEqual({ bytes, mime: outputMime[format] });
+      expect(`${job.id}.${extensionForOutputFormat(format)}`).toBe(`${job.id}.${format === "jpeg" ? "jpg" : format}`);
+    }
+  });
+  it("tells the local runner to stop on a rejected key while the request keeps the provider's reason", async () => {
+    const { ImageRequestError } = await import("../src/core/api-rejection");
+    for (const error of [
+      apiError(401, { error: { message: "Incorrect API key provided." } }),
+      new ImageRequestError(401, "The provider rejected this API key (401). Check the key and try again."),
+    ]) {
+      const job = await make("api");
+      process.env.OPENAI_API_KEY = "test-key";
+      await store.put("models", "openai", [
+        { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
+      ]);
+      vi.mocked(generate).mockRejectedValueOnce(error);
+      const failed = vi.fn(async () => {});
+      await executeImageJob(job.id, store, { admit: async commit => { await commit(); return true; }, failed });
+      expect(failed).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("OpenAI rejected access"), true, undefined);
+      const saved = (await store.get<Job>("jobs", job.id))!;
+      expect(saved.status).toBe("failed");
+      expect(saved.error).toContain("(HTTP 401)");
+      expect(saved.error).toContain("No image was generated.");
+      hidesSecrets(saved);
+    }
   });
   it("preserves uncertain failures without replaying the request", async () => {
     const job = await make("api");
@@ -216,6 +295,103 @@ describe("runtime", () => {
     expect(JSON.stringify(await api.jobs())).not.toContain("test-key");
     await execute(job.id);
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+  it("records a definite provider rejection as failed and allows another request", async () => {
+    const quota = await failApi(apiError(429, {
+      error: { message: "You exceeded your current quota", type: "insufficient_quota", code: "insufficient_quota" },
+    }));
+    expect(quota.status).toBe("failed");
+    expect(quota.error).toContain("https://platform.openai.com/settings/organization/billing");
+    expect(quota.error).toMatch(/no credits/i);
+    expect(quota.error).toContain("HTTP 429");
+    expect(quota.error).toContain("No image was generated.");
+    expect(quota.error).not.toContain("may have been charged");
+    expect(jobRecovery(quota)).toMatchObject({
+      action: "inspect_error",
+      automaticRetryAllowed: false,
+      message: "Read the error and fix its cause before retrying. Do not repeat an unchanged failing request.",
+    });
+    hidesSecrets(quota);
+    const retried = await retryImageJob(quota.id);
+    expect(retried.id).not.toBe(quota.id);
+    expect(retried.status).toBe("queued");
+    expect((await store.get<Job>("jobs", quota.id))?.status).toBe("failed");
+
+    const invalid = await failApi(apiError(400, {
+      error: { message: `Invalid size: 100x100 is not supported. ${"x".repeat(400)}TAIL_SHOULD_BE_OMITTED` },
+    }));
+    expect(invalid.status).toBe("failed");
+    expect(invalid.error).toContain("HTTP 400");
+    expect(invalid.error).toContain("Invalid size: 100x100 is not supported.");
+    expect(invalid.error).toContain("No image was generated.");
+    expect(invalid.error).not.toContain("TAIL_SHOULD_BE_OMITTED");
+    expect(invalid.error!.length).toBeLessThanOrEqual(400);
+    hidesSecrets(invalid);
+
+    const limited = await failApi(apiError(429, {
+      error: { message: "Rate limit reached for requests.", type: "requests", code: "rate_limit_exceeded" },
+    }));
+    expect(limited.status).toBe("failed");
+    expect(limited.error).toContain("Retry later.");
+    expect(limited.error).toContain("No image was generated.");
+    expect(limited.error).not.toContain("platform.openai.com");
+    hidesSecrets(limited);
+  });
+  it("keeps timeouts, aborts, network failures and server errors uncertain", async () => {
+    const abort = new Error("The operation was aborted");
+    abort.name = "AbortError";
+    const uncertain = "Generation did not complete locally. Check the provider before creating another request; it may have been charged.";
+    for (const error of [
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      abort,
+      new APICallError({
+        message: "Cannot connect to API: socket hang up",
+        url: "https://api.openai.com/v1/images/generations",
+        requestBodyValues: { secret: "do-not-store-request-body-sentinel" },
+      }),
+      apiError(500, { error: { message: "The server had an error while processing your request.", type: "server_error" } }),
+    ]) {
+      const saved = await failApi(error);
+      expect(saved.status).toBe("uncertain");
+      expect(saved.error).toBe(uncertain);
+      expect(JSON.stringify(saved)).not.toContain("do-not-store");
+      expect(JSON.stringify(saved)).not.toContain("server had an error");
+    }
+  });
+  it("records an SVG provider 429 as failed without keeping the API key", async () => {
+    const job = await make("api");
+    const secret = "svg-quota-key-should-not-appear";
+    process.env.OPENAI_API_KEY = secret;
+    await store.put("models", "openai", [
+      { id: "gpt-image-test", references: false, transparency: false, sizeProfile: { mode: "fixed", sizes: [{ width: 1024, height: 1024 }] } },
+    ]);
+    await store.put("jobs", job.id, { ...job, outputFormat: "svg" });
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: { message: "You have no credits remaining to generate images." } }),
+    })));
+    try {
+      const actual = await vi.importActual<typeof import("../src/sources/providers")>("../src/sources/providers");
+      vi.mocked(generate).mockImplementationOnce(actual.generate);
+      await execute(job.id);
+    } finally {
+      vi.stubGlobal("fetch", () => {
+        throw new Error("Real network access is disabled in tests. Mock the provider transport.");
+      });
+    }
+    const saved = (await store.get<Job>("jobs", job.id))!;
+    expect(saved.status).toBe("failed");
+    expect(saved.error).toContain("https://platform.openai.com/settings/organization/billing");
+    expect(saved.error).toMatch(/no credits/i);
+    expect(saved.error).toContain("No image was generated.");
+    expect(JSON.stringify(saved)).not.toContain(secret);
+    expect(jobRecovery(saved)).toMatchObject({ action: "inspect_error", automaticRetryAllowed: false });
+    const created = await api.create({
+      projectId: job.projectId, idempotencyKey: "after-quota", prompt: "Painted panda", source: "api",
+      provider: "openai", model: "gpt-image-test", width: 1024, height: 1024, transparent: false, referenceIds: [],
+    });
+    expect(created.status).toBe("queued");
   });
   it("recovers interrupted API status without calling a provider", async () => {
     const job = await make("api");
@@ -355,7 +531,7 @@ it("rejects cloud queue execution before touching files", async () => {
   const stub = vi.spyOn(stores, "storage").mockResolvedValue(store);
   const job = await make();
   process.env.STORAGE_DRIVER = "cloudflare";
-  await expect(execute(job.id)).rejects.toThrow("local companion");
+  await expect(execute(job.id)).rejects.toThrow("only in a local installation");
   stub.mockRestore();
 });
 it("rejects API generation without a discovered model profile", async () => {

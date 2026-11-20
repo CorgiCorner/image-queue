@@ -1,3 +1,4 @@
+import { GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI } from "../src/mcp/apps";
 import { png, mp4 } from "./fixtures";
 import { service } from "../src/core/runtime";
 import { mkdtemp, rm, writeFile, mkdir, symlink } from "node:fs/promises";
@@ -46,7 +47,7 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 describe("MCP client/server flow", () => {
   it("lists tools and manages project, request, result and cancellation", async () => {
     const tools=(await client.listTools()).tools;
-    expect(tools).toHaveLength(27);
+    expect(tools).toHaveLength(29);
     expect(tools.map(tool=>tool.name)).toEqual(expect.arrayContaining(["get_queue_processing","set_queue_processing"]));
     const p = await call("create_project", { name: "Agent project" });
     expect(await call("list_projects")).toHaveLength(1);
@@ -280,7 +281,7 @@ it("registers optional HTML resources only for a capable host", async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const resources = await appClient.listResources();
     expect(resources.resources.map((item) => item.uri)).toContain(
-      "ui://image-queue/job",
+      JOB_VIEW_URI,
     );
     const appTools = (await appClient.listTools()).tools;
     expect(
@@ -288,14 +289,14 @@ it("registers optional HTML resources only for a capable host", async () => {
     ).toMatchObject({ ui: { visibility: ["app"] } });
     expect(
       appTools.find((tool) => tool.name === "show_job")?._meta,
-    ).toMatchObject({ ui: { resourceUri: "ui://image-queue/job" } });
+    ).toMatchObject({ ui: { resourceUri: JOB_VIEW_URI } });
     expect(
       (await client.listTools()).tools.some(
         (tool) => tool.name === "get_job_state",
       ),
     ).toBe(false);
     const resource = await appClient.readResource({
-      uri: "ui://image-queue/job",
+      uri: JOB_VIEW_URI,
     });
     expect(resource.contents[0].mimeType).toBe("text/html;profile=mcp-app");
     await expect(
@@ -338,6 +339,26 @@ it("registers optional HTML resources only for a capable host", async () => {
     await expect(appClient.readResource({
       uri: "image-queue://thumbnail/trashed-preview",
     })).rejects.toThrow("unavailable");
+    await api.store.put("jobs", "pending-preview", {
+      id: "pending-preview", status: "queued", source: "api",
+      blobKey: "results/test-preview", createdAt: "2026-01-01", prompt: "A violet rectangle",
+    });
+    expect(appTools.find(tool => tool.name === "read_thumbnail")?._meta)
+      .toEqual({ ui: { visibility: ["app"] } });
+    expect((await client.listTools()).tools.some(tool => tool.name === "read_thumbnail")).toBe(false);
+    const toolPreview = await appClient.callTool({ name: "read_thumbnail", arguments: { id: "preview" } });
+    expect(toolPreview.isError).toBeFalsy();
+    expect(toolPreview.content).toEqual([{
+      type: "image", mimeType: "image/webp", data: "blob" in content ? content.blob : undefined,
+    }, { type: "text", text: JSON.stringify({ animated: false }) }]);
+    for (const id of ["trashed-preview", "pending-preview", "missing", "../escape"]) {
+      const refused = await appClient.callTool({ name: "read_thumbnail", arguments: { id } });
+      expect(refused.isError, id).toBe(true);
+      expect(refused.content, id).toEqual([{ type: "text", text: expect.any(String) }]);
+      expect(JSON.stringify(refused.content), id).not.toContain("results/test-preview");
+    }
+    await expect(appClient.readResource({ uri: "image-queue://thumbnail/pending-preview" })).rejects.toThrow("unavailable");
+    await expect(client.callTool({ name: "read_thumbnail", arguments: { id: "preview" } })).rejects.toThrow("not found");
     expect(appTools.find(tool => tool.name === "add_notes_to_queue")?._meta)
       .toMatchObject({ ui: { visibility: ["app"] } });
     expect((await client.listTools()).tools.some(tool => tool.name === "add_notes_to_queue")).toBe(false);
@@ -345,8 +366,8 @@ it("registers optional HTML resources only for a capable host", async () => {
       .toMatchObject({ ui: { visibility: ["app"] } });
     expect((await client.listTools()).tools.some(tool => tool.name === "get_image_details")).toBe(false);
     await api.store.put("notes", "preview-note", { id: "preview-note", imageId: "preview", text: "Brighten sky", x: 0.5, y: 0.2 });
-    expect(appTools.find(tool => tool.name === "show_image")?._meta).toMatchObject({ ui: { resourceUri: "ui://image-queue/image" } });
-    const imageResource = await appClient.readResource({ uri: "ui://image-queue/image" });
+    expect(appTools.find(tool => tool.name === "show_image")?._meta).toMatchObject({ ui: { resourceUri: IMAGE_VIEW_URI } });
+    const imageResource = await appClient.readResource({ uri: IMAGE_VIEW_URI });
     expect(imageResource.contents[0].mimeType).toBe("text/html;profile=mcp-app");
     const project = await api.createProject("MCP parity");
     for (const request of [
@@ -792,7 +813,7 @@ it("changes only the saved source and lets an omitted source use it",async()=>{
  expect(result).toMatchObject({generationStarted:false,existingRequestsChanged:false,preference:{source:'api'}});
  expect((await call('get_generation_source')).preference.model).toBe('gpt-image-1.5');
  const project=await api.createProject('API default');
- const runtime=await import('../src/core/runtime');const enqueueSpy=vi.spyOn(runtime,'enqueue').mockResolvedValue(undefined);
+ const runtime=await import('../src/core/runtime');const enqueueSpy=vi.spyOn(runtime,'dispatch').mockResolvedValue(undefined);
  try {
   const job=await call('request_image',{projectId:project.id,prompt:'A red square',width:1024,height:1024,idempotencyKey:'saved-default'});
   expect(job).toMatchObject({source:'api',model:'gpt-image-1.5',status:'queued'});
@@ -825,6 +846,181 @@ it("replays an identical MCP request after its default and model catalog change"
   } finally {
     enqueue.mockRestore();
   }
+});
+
+it("reports and enforces gpt-image-2.6-flare and gpt-image-1.5 capabilities", async () => {
+  const api = await service();
+  await api.store.put("models", "openai", [
+    { id: "gpt-image-2.6-flare", name: "GPT Image 2.6 Flare", provider: "openai", references: false, transparency: false },
+    { id: "gpt-image-1.5", name: "GPT Image 1.5", provider: "openai", references: true, transparency: true },
+  ]);
+  const models = await call("list_models");
+  expect(models.map((model: { id: string }) => model.id)).toEqual(["gpt-image-2.6-flare", "gpt-image-1.5"]);
+  expect(models[0]).toMatchObject({
+    transparency: true, references: true,
+    sizeProfile: { mode: "dimensions", maxSide: 3840, multiple: 16, minPixels: 655360, maxPixels: 8294400 },
+    qualities: ["low", "medium", "high", "xhigh", "max", "auto"],
+  });
+  expect(models[1].sizeProfile.sizes).toContainEqual({ width: 1536, height: 1024 });
+  await call("set_generation_source", { source: "api", model: "gpt-image-2.6-flare" });
+  expect(await call("get_generation_source")).toMatchObject({
+    preference: { source: "api", model: "gpt-image-2.6-flare" },
+    model: { id: "gpt-image-2.6-flare", transparency: true },
+  });
+  const project = await api.createProject("Flare capabilities");
+  const runtime = await import("../src/core/runtime");
+  const enqueueSpy = vi.spyOn(runtime, "enqueue").mockResolvedValue(undefined);
+  try {
+    const wide = await call("request_image", { projectId: project.id, prompt: "A wide red panda forest", aspectRatio: "16:9", transparent: true, quality: "high", idempotencyKey: "flare-wide" });
+    expect(wide).toMatchObject({ model: "gpt-image-2.6-flare", width: 2048, height: 1152, transparent: true, quality: "high" });
+    const sprite = await call("request_image", { projectId: project.id, prompt: "A red panda sprite", width: 256, height: 256, transparent: true, idempotencyKey: "flare-sprite" });
+    expect(sprite).toMatchObject({ width: 256, height: 256, transparent: true });
+    await expect(call("request_image", { projectId: project.id, prompt: "Too high quality", model: "gpt-image-1.5", width: 1024, height: 1024, quality: "xhigh", idempotencyKey: "legacy-xhigh" }))
+      .rejects.toThrow('does not support quality "xhigh"');
+    await expect(call("request_images", { requests: [
+      { projectId: project.id, prompt: "Fine request", width: 1024, height: 1024, idempotencyKey: "batch-ok" },
+      { projectId: project.id, prompt: "Queue with quality", source: "queue", width: 1024, height: 1024, quality: "low", idempotencyKey: "batch-queue-quality" },
+    ] })).rejects.toThrow("Quality and complexity apply only to API generation");
+    expect((await call("list_jobs", { projectId: project.id })).some((job: { idempotencyKey: string }) => job.idempotencyKey === "batch-ok")).toBe(false);
+    await expect(call("request_image", { projectId: project.id, prompt: "Beyond the limit", width: 4096, height: 2304, idempotencyKey: "flare-too-wide" }))
+      .rejects.toThrow("between 16 and 3840 pixels");
+  } finally { enqueueSpy.mockRestore(); }
+});
+
+it("profiles every discovered OpenAI image model per ID and defaults to gpt-image-2.6-sunburst", async () => {
+  const api = await service();
+  const ids = ["gpt-image-1-mini", "gpt-image-1.5", "gpt-image-2", "gpt-image-2-2026-04-21", "gpt-image-2.5-flare", "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst-2026-09-08", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"];
+  await api.store.put("models", "openai", ids.map(id => ({ id, name: id, provider: "openai", references: false, transparency: false })));
+  const models = await call("list_models");
+  expect(models.map((model: { id: string }) => model.id).slice(0, 2)).toEqual(["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]);
+  expect(new Set(models.map((model: { id: string }) => model.id))).toEqual(new Set(ids));
+  const byId = Object.fromEntries(models.map((model: { id: string }) => [model.id, model]));
+  expect(byId["gpt-image-2.6-sunburst"]).toMatchObject({
+    transparency: true, references: true, complexities: ["low", "medium", "high"],
+    outputFormats: ["png", "webp", "jpeg", "gif", "svg"], generationVerified: false,
+    documentedOnly: expect.arrayContaining(["generation", "reference edit"]),
+  });
+  expect(byId["gpt-image-2.5-sunburst"]).toMatchObject({ complexities: [], outputFormats: ["png", "webp", "jpeg"], qualities: expect.arrayContaining(["xhigh", "max"]) });
+  expect(byId["gpt-image-2"].qualities).not.toContain("xhigh");
+  expect(byId["gpt-image-1-mini"].sizeProfile.mode).toBe("fixed");
+
+  await call("set_generation_source", { source: "api" });
+  expect((await call("get_generation_source")).preference.model).toBe("gpt-image-2.6-sunburst");
+  await call("set_generation_source", { source: "api", model: "gpt-image-2.6-sunburst" });
+  const project = await api.createProject("Sunburst capabilities");
+  const runtime = await import("../src/core/runtime");
+  const enqueueSpy = vi.spyOn(runtime, "enqueue").mockResolvedValue(undefined);
+  try {
+    const portrait = await call("request_image", { projectId: project.id, prompt: "A tall red panda banner", aspectRatio: "9:16", transparent: true, quality: "max", complexity: "medium", idempotencyKey: "sunburst-portrait" });
+    expect(portrait).toMatchObject({ model: "gpt-image-2.6-sunburst", width: 1152, height: 2048, quality: "max", complexity: "medium" });
+    await expect(call("request_image", { projectId: project.id, prompt: "No complexity", model: "gpt-image-2.5-sunburst", width: 1024, height: 1024, complexity: "low", idempotencyKey: "25-complexity" }))
+      .rejects.toThrow('does not support complexity "low". Supported: none.');
+    await expect(call("request_image", { projectId: project.id, prompt: "Queue complexity", source: "queue", width: 1024, height: 1024, complexity: "high", idempotencyKey: "queue-complexity" }))
+      .rejects.toThrow("Quality and complexity apply only to API generation");
+  } finally { enqueueSpy.mockRestore(); }
+});
+
+it("rejects an output format the source or model cannot use before creating any job", async () => {
+  const api = await service();
+  await api.store.put("models", "openai", [
+    { id: "gpt-image-2.6-sunburst", name: "Sunburst", provider: "openai", references: true, transparency: true },
+    { id: "gpt-image-1.5", name: "GPT Image 1.5", provider: "openai", references: true, transparency: true },
+  ]);
+  await call("set_generation_source", { source: "api", model: "gpt-image-2.6-sunburst" });
+  const project = await api.createProject("Formats");
+  const runtime = await import("../src/core/runtime");
+  const enqueueSpy = vi.spyOn(runtime, "enqueue").mockResolvedValue(undefined);
+  const base = { projectId: project.id, prompt: "A red panda", width: 1024, height: 1024 };
+  try {
+    await expect(call("request_image", { ...base, source: "queue", outputFormat: "webp", idempotencyKey: "queue-webp" }))
+      .rejects.toThrow("Output format and frame settings apply only to API generation");
+    await expect(call("request_image", { ...base, model: "gpt-image-1.5", outputFormat: "svg", idempotencyKey: "legacy-svg" }))
+      .rejects.toThrow('does not support output format "svg"');
+    await expect(call("request_image", { ...base, outputFormat: "jpeg", transparent: true, idempotencyKey: "jpeg-transparent" }))
+      .rejects.toThrow("Transparent background requires PNG or WebP");
+    const reference = await api.addReference(project.id, "ref.png", "image/png", png);
+    await expect(call("request_image", { ...base, outputFormat: "svg", referenceIds: [reference.id], idempotencyKey: "svg-ref" }))
+      .rejects.toThrow("cannot be combined with reference images");
+    await expect(call("request_image", { ...base, outputFormat: "gif", referenceIds: [reference.id], idempotencyKey: "gif-ref" }))
+      .rejects.toThrow("GIF output with reference images is not supported by this application yet.");
+    await expect(call("request_image", { ...base, outputFormat: "svg", frameCount: 4, idempotencyKey: "svg-frames" }))
+      .rejects.toThrow("only to GIF");
+    await expect(call("request_image", { ...base, outputFormat: "png", frameDurationMs: 200, idempotencyKey: "png-frames" }))
+      .rejects.toThrow("only to GIF");
+    await expect(call("request_images", { requests: [
+      { ...base, idempotencyKey: "counted-ok", count: 2, outputFormat: "webp" },
+      { ...base, idempotencyKey: "counted-bad", outputFormat: "svg", referenceIds: [reference.id] },
+    ] })).rejects.toThrow("cannot be combined with reference images");
+    expect(await call("list_jobs", { projectId: project.id })).toEqual([]);
+  } finally { enqueueSpy.mockRestore(); }
+});
+
+it("expands count into independent jobs, replays them, and caps the expanded batch at 20", async () => {
+  const api = await service();
+  await api.store.put("models", "openai", [
+    { id: "gpt-image-2.6-sunburst", name: "Sunburst", provider: "openai", references: true, transparency: true },
+  ]);
+  await call("set_generation_source", { source: "api", model: "gpt-image-2.6-sunburst" });
+  const project = await api.createProject("Count");
+  const runtime = await import("../src/core/runtime");
+  const enqueueSpy = vi.spyOn(runtime, "enqueue").mockResolvedValue(undefined);
+  const again = { projectId: project.id, prompt: "Three pandas", width: 1024, height: 1024, idempotencyKey: "three", count: 3, outputFormat: "svg" as const };
+  try {
+    const once = await call("request_image", { projectId: project.id, prompt: "A single panda", width: 1024, height: 1024, idempotencyKey: "single", outputFormat: "svg" });
+    expect(once.jobs).toBeUndefined();
+    expect(once).toMatchObject({ id: "IMG-single", outputFormat: "svg" });
+    const created = await call("request_image", again);
+    expect(created.id).toBe("IMG-three");
+    expect(created.count).toBeUndefined();
+    expect(created.jobs.map((job: { id: string; outputFormat: string }) => job.id)).toEqual(["IMG-three", "IMG-three-2", "IMG-three-3"]);
+    expect(created.jobs.every((job: { outputFormat?: string; count?: number }) => job.outputFormat === "svg" && job.count === undefined)).toBe(true);
+    for (const job of created.jobs) await api.store.put("jobs", job.id, { ...job, status: "done" });
+    enqueueSpy.mockClear();
+    const replay = await call("request_image", again);
+    expect(replay.jobs.map((job: { id: string }) => job.id)).toEqual(["IMG-three", "IMG-three-2", "IMG-three-3"]);
+    expect(enqueueSpy).not.toHaveBeenCalled();
+    expect((await call("list_jobs", { projectId: project.id })).filter((job: { idempotencyKey: string }) => job.idempotencyKey.startsWith("three"))).toHaveLength(3);
+    await expect(call("request_images", { requests: [
+      { projectId: project.id, prompt: "A batch panda", width: 1024, height: 1024, idempotencyKey: "cap-a", count: 10 },
+      { projectId: project.id, prompt: "Another batch panda", width: 1024, height: 1024, idempotencyKey: "cap-b", count: 10 },
+      { projectId: project.id, prompt: "One more panda", width: 1024, height: 1024, idempotencyKey: "cap-c" },
+    ] })).rejects.toThrow("at most 20");
+    expect((await call("list_jobs", { projectId: project.id })).some((job: { idempotencyKey: string }) => job.idempotencyKey.startsWith("cap-"))).toBe(false);
+    const batch = await call("request_images", { requests: [
+      { projectId: project.id, prompt: "Wide panda", width: 1024, height: 1024, idempotencyKey: "batch-wide", count: 2, outputFormat: "webp" },
+    ] });
+    expect(batch.map((job: { id: string }) => job.id)).toEqual(["IMG-batch-wide", "IMG-batch-wide-2"]);
+  } finally { enqueueSpy.mockRestore(); }
+});
+
+it("writes one queue entry per count and returns the same jobs on replay", async () => {
+  const project = await call("create_project", { name: "Queue count" });
+  const request = { projectId: project.id, prompt: "Two queue pandas", source: "queue" as const, width: 1024, height: 1024, idempotencyKey: "queue-count", count: 2 };
+  const first = await call("request_image", request);
+  expect(first.jobs.map((job: { id: string }) => job.id)).toEqual(["IMG-queue-count", "IMG-queue-count-2"]);
+  expect(new Set(first.jobs.map((job: { outputPath: string }) => job.outputPath)).size).toBe(2);
+  const replay = await call("request_image", request);
+  expect(replay.jobs.map((job: { id: string }) => job.id)).toEqual(first.jobs.map((job: { id: string }) => job.id));
+  expect(await call("list_jobs", { projectId: project.id })).toHaveLength(2);
+});
+
+it("shows a finished image as inline image content and refuses unfinished ones", async () => {
+  const api = await service();
+  const project = await api.createProject("Inline preview");
+  const sharp = (await import("sharp")).default;
+  const png = new Uint8Array(await sharp({ create: { width: 32, height: 32, channels: 4, background: "#2563eb" } }).png().toBuffer());
+  await api.store.putBlob("results/inline-preview", png, "image/png");
+  await api.store.put("jobs", "IMG-inline-preview", {
+    id: "IMG-inline-preview", projectId: project.id, source: "api", status: "done", blobKey: "results/inline-preview",
+    prompt: "Inline", width: 1, height: 1, referenceIds: [], createdAt: "2026-11-19T20:00:00.000Z", updatedAt: "2026-11-19T20:00:00.000Z",
+  });
+  const shown = await client.callTool({ name: "view_image", arguments: { id: "IMG-inline-preview" } });
+  expect(shown.isError, JSON.stringify(shown.content)).toBeFalsy();
+  expect(shown.content).toEqual([expect.objectContaining({ type: "image", mimeType: expect.stringMatching(/^image\//) })]);
+  await api.store.put("jobs", "IMG-inline-pending", { id: "IMG-inline-pending", projectId: project.id, source: "api", status: "queued" });
+  const pending = await client.callTool({ name: "view_image", arguments: { id: "IMG-inline-pending" } });
+  expect(pending.isError).toBe(true);
 });
 
 it("counts external Codex requests before the dashboard imports the gallery", async () => {

@@ -20,6 +20,48 @@ it("prepares two references and retries the same correction without duplicate jo
   expect(await store.list("references")).toHaveLength(2);
   await expect(prepareCorrection(api, { ...input, instruction: "Different" })).rejects.toThrow("different request");
 });
+it("rejects an imported GIF and any SVG, which have no prompt to generate again and cannot be references", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  await store.put("jobs", job.id, { ...job, outputFormat: "gif" });
+  await addNote(store, { imageId: job.id, text: "Blue sky", x: 0.5, y: 0.5 });
+  await expect(prepareCorrection(api, { imageId: job.id, idempotencyKey: "gif" })).rejects.toThrow("cannot be used as references");
+  await store.put("jobs", job.id, { ...job, outputFormat: "svg", source: "api", imported: false });
+  await expect(prepareCorrection(api, { imageId: job.id, idempotencyKey: "svg" })).rejects.toThrow("cannot be used as references");
+  expect(await store.list("references")).toEqual([]);
+});
+it("generates a GIF again from its prompt with the requested changes, without references", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  const gif = { ...job, imported: false, source: "api" as const, provider: "openai" as const, model: "gpt-image-2.6-sunburst",
+    prompt: "A red panda relaxing on a branch", outputFormat: "gif" as const, frameCount: 8, frameDurationMs: 180, width: 960, height: 960 };
+  await store.put("jobs", job.id, gif);
+  await store.put("settings", "provider-openai", { id: "provider-openai" });
+  const key = vi.spyOn(await import("../src/core/settings"), "readKey").mockResolvedValue("test-key");
+  await addNote(store, { imageId: job.id, text: "Make the tail\nfluffier" });
+  await new Promise(resolve => setTimeout(resolve, 3)); // Notes are sent in the order they were saved.
+  await addNote(store, { imageId: job.id, text: "Add falling leaves" });
+  const input = { imageId: job.id, idempotencyKey: "panda-v2" };
+  const first = await prepareCorrection(api, input);
+  expect(first.prompt).toBe("A red panda relaxing on a branch\n\nRequested changes:\n1. Make the tail fluffier\n2. Add falling leaves");
+  expect(first).toMatchObject({ referenceIds: [], outputFormat: "gif", frameCount: 8, frameDurationMs: 180, width: 960, height: 960,
+    source: "api", model: "gpt-image-2.6-sunburst", parentVersionId: job.id });
+  expect((await prepareCorrection(api, input)).id).toBe(first.id);
+  expect(await store.list("references")).toEqual([]);
+  expect((await store.list<{ sentInJobId?: string }>("notes")).every(note => note.sentInJobId === first.id)).toBe(true);
+  // A third version keeps the earlier changes and continues their numbering.
+  await store.put("jobs", first.id, { ...(await store.get<typeof first>("jobs", first.id))!, status: "done" });
+  await addNote(store, { imageId: first.id, text: "Slower blink" });
+  const third = await prepareCorrection(api, { imageId: first.id, idempotencyKey: "panda-v3" });
+  expect(third.prompt).toBe(`${first.prompt}\n3. Slower blink`);
+  key.mockRestore();
+});
 it("rejects unavailable images before storing references", async () => {
   const store = new MemoryStorage();
   await expect(prepareCorrection(new ImageService(store), { imageId: "missing", idempotencyKey: "test" })).rejects.toThrow("ready");

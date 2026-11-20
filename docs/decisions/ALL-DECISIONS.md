@@ -12,6 +12,7 @@
 | [0007](0007-sync-between-machines-over-ssh.md) | superseded by ADR-0014 | Sync between a user's machines over SSH, without a shared queue |
 | [0008](0008-provider-neutral-names.md) | accepted | Use provider-neutral names for the product and its parts |
 | [0009](0009-optional-mcp-apps-views.md) | proposed | Offer MCP Apps views as an optional layer over the MCP tools |
+| [0012](0012-model-profiles-with-documented-capabilities.md) | accepted | Keep one model profile registry and mark documented-only capabilities |
 | [0013](0013-archive-and-trash-in-panel-metadata.md) | proposed | Keep archive and trash in panel metadata, and never delete files outside the store by default |
 | [0014](0014-optional-sync-through-an-s3-compatible-bucket.md) | accepted | Optional sync between machines through an S3-compatible bucket |
 | [0015](0015-portable-identities-without-renaming-worker-requests.md) | accepted | Add portable identities without renaming worker requests |
@@ -19,8 +20,9 @@
 | [0017](0017-forward-worker-requests-verbatim.md) | accepted | Forward image-worker requests verbatim with explicit reference attachments |
 | [0018](0018-kernel-locks-for-local-storage.md) | accepted | Use kernel locks for local storage operations |
 | [0019](0019-coordinate-local-queue-processing.md) | accepted | Coordinate local queue processing per generation source |
+| [0020](0020-remote-mcp-behind-cloudflare-access.md) | accepted | Protect the hosted MCP endpoint with Cloudflare Access and run generation from a queue |
 
-0010–0012 remain reserved for idempotency, durable execution and model profiles. Proposed records remain proposals.
+0010 and 0011 remain reserved for idempotency and durable execution. Proposed records remain proposals.
 
 ## ADR-0016
 

@@ -48,7 +48,7 @@ it("filters dimension and ratio profiles by their declared constraints", () => {
   expect(modelSizes("openai", "custom", {
     mode: "dimensions", minSide: 256, maxSide: 1536, multiple: 16,
     minPixels: 65536, maxPixels: 2000000, minRatio: 0.5, maxRatio: 2,
-  })).toEqual(["1024x1024", "1536x1024", "1024x1536"]);
+  })).toEqual(["1024x1024", "1536x1024", "1024x1536", "1472x1104", "1104x1472"]);
   expect(modelSizes("google", "custom", {
     mode: "aspect-ratio", ratios: ["1:1", "9:16"], levels: [],
   })).toEqual(["1024x1024", "1080x1920"]);
@@ -62,4 +62,12 @@ it("does not invent standard presets for a custom-only ratio profile", () => {
   expect(modelSizes("google", "custom", {
     mode: "aspect-ratio", ratios: ["5:4"], levels: [],
   })).toEqual([]);
+});
+
+it("offers every standard ratio natively for gpt-image-2.6-flare", async () => {
+  const { verifiedModelProfiles } = await import("../src/core/model-profiles");
+  const flare = verifiedModelProfiles.find(entry => entry.model === "gpt-image-2.6-flare")!;
+  expect(modelSizes("openai", flare.model, flare.sizeProfile)).toEqual([
+    "1024x1024", "1536x1024", "1024x1536", "1472x1104", "1104x1472", "2048x1152", "1152x2048", "2688x1152",
+  ]);
 });

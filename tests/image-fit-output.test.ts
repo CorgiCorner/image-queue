@@ -24,6 +24,25 @@ it("preserves transparency when fitting a PNG", async () => {
   expect(data[3]).toBe(0);
 });
 
+it("fits WebP and JPEG without converting them to PNG", async () => {
+  const input = await sharp({ create: { width: 200, height: 100, channels: 3, background: "red" } }).png().toBuffer();
+  for (const format of ["webp", "jpeg"] as const) {
+    const result = await fitImage(input, { width: 80, height: 40 }, format);
+    expect(result.mime).toBe(format === "jpeg" ? "image/jpeg" : "image/webp");
+    expect(await sharp(result.bytes).metadata()).toMatchObject({ width: 80, height: 40, format });
+  }
+});
+
+it("fits an animated GIF down without dropping frames or upscaling", async () => {
+  const red = await sharp({ create: { width: 80, height: 40, channels: 3, background: "red" } }).png().toBuffer();
+  const blue = await sharp({ create: { width: 80, height: 40, channels: 3, background: "blue" } }).png().toBuffer();
+  const gif = await sharp([red, blue], { join: { animated: true } }).gif().toBuffer();
+  const result = await fitImage(gif, { width: 40, height: 20 }, "gif");
+  expect(result.mime).toBe("image/gif");
+  expect(await sharp(result.bytes, { animated: true }).metadata()).toMatchObject({ width: 40, pageHeight: 20, pages: 2 });
+  await expect(fitImage(gif, { width: 160, height: 80 }, "gif")).rejects.toThrow("without upscaling");
+});
+
 it("crops the center rather than either edge", async () => {
   const center = await sharp({ create: { width: 100, height: 100, channels: 4, background: "blue" } }).png().toBuffer();
   const input = await sharp({ create: { width: 200, height: 100, channels: 4, background: "red" } })

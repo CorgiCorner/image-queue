@@ -16,19 +16,23 @@ export function connectionWorksMessage(models: number) {
 
 /**
  * One connected provider: its model count, a connection test with the stored key, and disconnect.
- * The test result replaces the model count in place. `revision` changes whenever the stored key is
- * replaced; a result checked against an older key is never shown.
+ * A failed test replaces the model count in place. A successful test leaves the count and reports
+ * its confirmation through `onConfirmed`. `revision` changes whenever the stored key is replaced;
+ * a result checked against an older key is never shown.
  */
-export function ConnectedProviderRow({ provider, label, count, revision = 0, onDisconnect }: {
+export function ConnectedProviderRow({ provider, label, count, revision = 0, onDisconnect, onConfirmed }: {
   provider: Provider;
   label: string;
   count: number;
   revision?: number;
   onDisconnect: () => Promise<void>;
+  onConfirmed?: (message: string) => void;
 }) {
   // Key revision of the test in flight; guards repeated clicks for the same key.
   const running = useRef<number>(undefined);
   const nextId = useRef(0);
+  const revisionNow = useRef(revision);
+  revisionNow.current = revision;
   const [testingRevision, setTestingRevision] = useState<number>();
   const [result, setResult] = useState<TestResult>();
   const testing = testingRevision === revision;
@@ -49,20 +53,27 @@ export function ConnectedProviderRow({ provider, label, count, revision = 0, onD
     if (running.current === started) return;
     running.current = started;
     setTestingRevision(started);
-    let message: string;
+    let outcome: { ok: true; models: number } | { ok: false; message: string };
     try {
       const response = await testConnectionAction({ provider });
-      message = response?.data
-        ? connectionWorksMessage(response.data.models)
-        : response?.serverError ?? "The connection could not be checked. Try again.";
+      outcome = response?.data
+        ? { ok: true, models: response.data.models }
+        : { ok: false, message: response?.serverError ?? "The connection could not be checked. Try again." };
     } catch {
-      message = "The connection could not be checked. Try again.";
+      outcome = { ok: false, message: "The connection could not be checked. Try again." };
     } finally {
       if (running.current === started) running.current = undefined;
       setTestingRevision(value => value === started ? undefined : value);
     }
-    const id = ++nextId.current;
     // Revisions only grow, so a result for an older key never replaces a newer one.
+    if (revisionNow.current !== started) return;
+    if (outcome.ok) {
+      setResult(undefined);
+      onConfirmed?.(connectionWorksMessage(outcome.models));
+      return;
+    }
+    const id = ++nextId.current;
+    const message = outcome.message;
     setResult(value => value && value.keyRevision > started ? value : { message, id, keyRevision: started });
   }
 

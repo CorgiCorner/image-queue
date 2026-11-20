@@ -8,6 +8,8 @@ vi.mock("../src/mcp/views/compact-app", () => ({
     onteardown: any;
     callServerTool = vi.fn();
     openLink = vi.fn(async () => ({}));
+    downloadFile = vi.fn(async () => ({}));
+    canDownloadFiles = vi.fn(() => true);
     readServerResource = vi.fn(async () => ({contents:[]}));
     connect = vi.fn(async () => {});
     getHostContext = vi.fn(() => ({theme:"dark",styles:{variables:{"--color-text-primary":"white"}}}));
@@ -23,10 +25,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
 });
+// The preview asks the app-only tool first, so the resource fallback starts a few microtasks later.
+async function settle() {
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+}
 async function openView() {
   vi.resetModules();
   document.body.innerHTML =
-    '<p role="status"></p><p id="workers-offline" role="note" hidden></p><p id="source"></p><p id="prompt"></p><pre id="path"></pre><button id="copy-path" hidden>Copy path</button><button id="open-app" hidden>Open in image-queue</button>';
+    '<p role="status"></p><p id="workers-offline" role="note" hidden></p><p id="source"></p><p id="prompt"></p><pre id="path"></pre><button id="copy-path" hidden>Copy path</button><button id="open-app" hidden>Open in image-queue</button><button id="download" hidden>Download</button>';
   vi.stubGlobal(
     "IntersectionObserver",
     class {
@@ -76,7 +82,7 @@ it("renders state and polls until completion", async () => {
   bridge.visibility([{ isIntersecting: false }]);
   bridge.visibility([{ isIntersecting: true }]);
   await vi.advanceTimersByTimeAsync(10000);
-  expect(app.callServerTool).toHaveBeenCalledTimes(1);
+  expect(app.callServerTool.mock.calls.filter(([request]: [{ name: string }]) => request.name === "get_job_state")).toHaveLength(1);
   await app.onteardown();
 });
 it("handles malformed responses and deleted jobs", async () => {
@@ -112,9 +118,9 @@ it("retries a failed preview when the same completed job is rendered again", asy
   app.readServerResource.mockRejectedValueOnce(new Error("temporary"));
   const result={content:[{type:"text",text:JSON.stringify({id:"one",status:"done",prompt:"Image"})}]};
   app.ontoolresult(result);
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   app.ontoolresult(result);
+  await settle();
   expect(app.readServerResource).toHaveBeenCalledTimes(2);
   await app.onteardown();
 });
@@ -123,11 +129,56 @@ it("reports empty thumbnail responses and permits retry", async () => {
   const app = await openView();
   const result={content:[{type:"text",text:JSON.stringify({id:"one",status:"done",prompt:"Image"})}]};
   app.ontoolresult(result);
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   expect(document.querySelector('[role="status"]')?.textContent).toBe("Ready. Preview unavailable.");
   app.ontoolresult(result);
+  await settle();
   expect(app.readServerResource).toHaveBeenCalledTimes(2);
+  await app.onteardown();
+});
+
+it("shows the preview from the app-only tool without reading the resource", async () => {
+  const app = await openView();
+  document.body.insertAdjacentHTML("beforeend", '<div id="placeholder"></div><img id="preview" hidden>');
+  app.callServerTool.mockImplementation(async ({ name }: { name: string }) => name === "read_thumbnail"
+    ? { content: [{ type: "image", mimeType: "image/webp", data: "dG9vbA==" }] }
+    : { content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "Image" }) }] });
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "Image" }) }] });
+  await settle();
+  const preview = document.querySelector<HTMLImageElement>("#preview")!;
+  expect(app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "one" } });
+  expect(preview.src).toBe("data:image/webp;base64,dG9vbA==");
+  expect(preview.hidden).toBe(false);
+  expect(document.querySelector<HTMLElement>("#placeholder")!.hidden).toBe(true);
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Ready");
+  expect(app.readServerResource).not.toHaveBeenCalled();
+  await app.onteardown();
+});
+
+it("falls back to the thumbnail resource when the tool is refused", async () => {
+  const app = await openView();
+  document.body.insertAdjacentHTML("beforeend", '<img id="preview" hidden>');
+  app.callServerTool.mockRejectedValue(new Error("Unknown tool"));
+  app.readServerResource.mockResolvedValue({ contents: [{ blob: "cmVzb3VyY2U=", mimeType: "image/webp" }] });
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "Image" }) }] });
+  await settle();
+  expect(app.readServerResource).toHaveBeenCalledWith({ uri: "image-queue://thumbnail/one" });
+  expect(document.querySelector<HTMLImageElement>("#preview")!.src).toBe("data:image/webp;base64,cmVzb3VyY2U=");
+  await app.onteardown();
+});
+
+it("reports an unavailable preview only after the tool and the resource both fail", async () => {
+  const app = await openView();
+  document.body.insertAdjacentHTML("beforeend", '<img id="preview" hidden>');
+  const job = { content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "Image" }) }] };
+  app.callServerTool.mockImplementation(async ({ name }: { name: string }) => name === "read_thumbnail"
+    ? { isError: true, content: [{ type: "text", text: "Image is unavailable" }] } : job);
+  app.readServerResource.mockRejectedValue(new Error("Resource unavailable"));
+  app.ontoolresult(job);
+  await settle();
+  expect(app.readServerResource).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Ready. Preview unavailable.");
+  expect(document.querySelector<HTMLImageElement>("#preview")!.hidden).toBe(true);
   await app.onteardown();
 });
 
@@ -155,12 +206,11 @@ it("ignores an old thumbnail response after switching jobs", async () => {
   app.readServerResource.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
   app.readServerResource.mockResolvedValueOnce({ contents: [{ blob: "bmV3", mimeType: "image/png" }] });
   app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "old", status: "done", prompt: "Old" }) }] });
+  await settle();
   app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "new", status: "done", prompt: "New" }) }] });
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   resolveOld({ contents: [{ blob: "b2xk", mimeType: "image/png" }] });
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   expect(document.querySelector<HTMLImageElement>("#preview")!.src).toBe("data:image/png;base64,bmV3");
   expect(document.querySelector("#prompt")?.textContent).toBe("New");
   await app.onteardown();
@@ -204,10 +254,10 @@ it("does not restore an in-flight preview after a trash update", async () => {
   app.readServerResource.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
   const job = { id: "one", status: "done", prompt: "Image" };
   app.ontoolresult({ content: [{ type: "text", text: JSON.stringify(job) }] });
+  await settle();
   app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ ...job, trashedAt: "2026-11-14" }) }] });
   complete({ contents: [{ blob: "b2xk", mimeType: "image/png" }] });
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   const preview = document.querySelector<HTMLImageElement>("#preview")!;
   expect(preview.hidden).toBe(true);
   expect(preview.hasAttribute("src")).toBe(false);
@@ -319,8 +369,7 @@ it("keeps the placeholder hidden on repeated ready updates after preview loading
   app.readServerResource.mockResolvedValue({ contents: [{ blob: "aGVsbG8=", mimeType: "image/png" }] });
   app.callServerTool.mockResolvedValue(response);
   app.ontoolresult(response);
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
   app.ontoolresult(response);
   expect(placeholder.hidden).toBe(true);
   await app.onteardown();
@@ -461,7 +510,7 @@ it("keeps the loaded preview and copy state through an unchanged job refresh", a
   const job={id:"stable",status:"done",prompt:"Stable image",outputPath:"/output/stable.png"};
   const result={content:[{type:"text",text:JSON.stringify(job)}]};
   app.ontoolresult(result);
-  await Promise.resolve();await Promise.resolve();
+  await settle();
   const preview=document.querySelector<HTMLImageElement>('#preview')!;
   const source=preview.src;
   const copy=document.querySelector<HTMLButtonElement>('#copy-path')!;
@@ -473,4 +522,101 @@ it("keeps the loaded preview and copy state through an unchanged job refresh", a
   expect(copy.textContent).toBe("Copied");
   expect(app.readServerResource).toHaveBeenCalledTimes(1);
   await app.onteardown();
+});
+
+it("offers a full-size download for a finished image and hands it to the host", async () => {
+  const app = await openView();
+  const file = { uri: "image-queue://image/one.png", mimeType: "image/png", blob: "UE5H" };
+  app.callServerTool.mockImplementation(async ({ name }: { name: string }) =>
+    name === "read_image_file" ? { content: [{ type: "resource", resource: file }] } : { isError: true, content: [] });
+  document.body.insertAdjacentHTML("beforeend", '<div id="placeholder" hidden></div>');
+  const download = document.querySelector<HTMLButtonElement>("#download")!;
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "one", status: "running", prompt: "A forest" }) }] });
+  expect(download.hidden).toBe(true);
+  expect(document.querySelector<HTMLElement>("#placeholder")?.dataset.label).toBe("Generating…");
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "A forest" }) }] });
+  expect(download.hidden).toBe(false);
+  expect(document.querySelector<HTMLElement>("#placeholder")?.dataset.label).toBe("Loading preview…");
+  download.click();
+  await settle();
+  expect(app.callServerTool).toHaveBeenCalledWith({ name: "read_image_file", arguments: { id: "one" } });
+  expect(app.downloadFile).toHaveBeenCalledWith({ contents: [{ type: "resource", resource: file }] });
+  expect(download.textContent).toBe("Download");
+});
+
+it("opens the full image when the host cannot save files", async () => {
+  const app = await openView();
+  app.canDownloadFiles.mockReturnValue(false);
+  app.callServerTool.mockResolvedValue({ isError: true, content: [] });
+  document.body.dataset.dashboard = encodeURIComponent("https://app.example.com");
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "one", status: "done", prompt: "A forest" }) }] });
+  document.querySelector<HTMLButtonElement>("#download")!.click();
+  await settle();
+  expect(app.openLink).toHaveBeenCalledWith({ url: "https://app.example.com/api/asset?job=one" });
+  delete document.body.dataset.dashboard;
+});
+
+const gifJob = { content: [{ type: "text", text: JSON.stringify({ id: "gif", status: "done", prompt: "A corgi typing", outputFormat: "gif" }) }] };
+function previewResult(data: string, animated: boolean) {
+  return { content: [{ type: "image", mimeType: "image/webp", data }, { type: "text", text: JSON.stringify({ animated }) }] };
+}
+async function openGifView(tool: (call: { name: string; arguments: Record<string, unknown> }) => unknown) {
+  const app = await openView();
+  document.body.insertAdjacentHTML("beforeend", '<img id="preview" hidden><button id="play" hidden>Play animation</button>');
+  // The view was imported before these elements existed, so load it again with them in place.
+  vi.resetModules();
+  await import("../src/mcp/views/job");
+  bridge.app.callServerTool.mockImplementation(async (call: any) => tool(call));
+  return bridge.app as typeof app;
+}
+
+it("plays a GIF in the request view through an animated preview", async () => {
+  const app = await openGifView(({ name }) => name === "read_thumbnail" ? previewResult("YW5pbQ==", true) : { isError: true, content: [] });
+  app.ontoolresult(gifJob);
+  await settle();
+  expect(app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "gif", animated: true } });
+  expect(document.querySelector<HTMLImageElement>("#preview")!.src).toBe("data:image/webp;base64,YW5pbQ==");
+  expect(document.querySelector<HTMLButtonElement>("#play")!.hidden).toBe(true);
+});
+
+it("shows a still with Play under reduced motion and starts the animation on request", async () => {
+  // The view's stylesheet sets this under the reduced-motion media query.
+  document.documentElement.style.setProperty("--motion-reduced", "1");
+  const app = await openGifView(({ name, arguments: args }) =>
+    name === "read_thumbnail" ? previewResult(args.animated ? "YW5pbQ==" : "c3RpbGw=", Boolean(args.animated)) : { isError: true, content: [] });
+  app.ontoolresult(gifJob);
+  await settle();
+  const preview = document.querySelector<HTMLImageElement>("#preview")!;
+  const play = document.querySelector<HTMLButtonElement>("#play")!;
+  expect(app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "gif" } });
+  expect(preview.src).toBe("data:image/webp;base64,c3RpbGw=");
+  expect(play.hidden).toBe(false);
+  play.click();
+  await settle();
+  expect(preview.src).toBe("data:image/webp;base64,YW5pbQ==");
+  expect(play.hidden).toBe(true);
+  document.documentElement.style.removeProperty("--motion-reduced");
+});
+
+it("plays the full file when the preview service returned one frame", async () => {
+  const app = await openGifView(({ name }) =>
+    name === "read_thumbnail" ? previewResult("c3RpbGw=", false)
+      : name === "read_image_file" ? { content: [{ type: "resource", resource: { uri: "image-queue://image/gif.gif", mimeType: "image/gif", blob: "R0lG" } }] }
+        : { isError: true, content: [] });
+  app.ontoolresult(gifJob);
+  await settle();
+  const play = document.querySelector<HTMLButtonElement>("#play")!;
+  expect(play.hidden).toBe(false);
+  play.click();
+  await settle();
+  expect(document.querySelector<HTMLImageElement>("#preview")!.src).toBe("data:image/gif;base64,R0lG");
+  expect(play.hidden).toBe(true);
+});
+
+it("keeps Play away from images that are not GIFs", async () => {
+  const app = await openGifView(({ name }) => name === "read_thumbnail" ? previewResult("c3RpbGw=", false) : { isError: true, content: [] });
+  app.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ id: "png", status: "done", prompt: "A fox" }) }] });
+  await settle();
+  expect(app.callServerTool).toHaveBeenCalledWith({ name: "read_thumbnail", arguments: { id: "png" } });
+  expect(document.querySelector<HTMLButtonElement>("#play")!.hidden).toBe(true);
 });

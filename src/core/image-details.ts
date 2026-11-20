@@ -2,6 +2,7 @@ import { UserFacingError } from "./user-facing-error";
 import { idSchema, type Job } from "./schema";
 import type { ImageNote } from "./notes";
 import { orderedVersions } from "./version-order";
+import { nextVersionMode } from "./image-format";
 import type { Storage } from "../storage/types";
 
 /** Compact read model shared by conversational image views. */
@@ -20,6 +21,8 @@ export async function imageDetails(store: Storage, imageId: string) {
       id: image.id, prompt: image.prompt, status: image.status, archivedAt: image.archivedAt,
       width: image.width, height: image.height, projectId: image.projectId, topicId: image.topicId,
       aspectRatio: image.aspectRatio,
+      source: image.source, provider: image.provider, model: image.model, outputFormat: image.outputFormat,
+      nextVersion: nextVersionMode(image),
       resolution: image.resolution,
       requestedSize: image.exactDimensions === false ? undefined : image.requestedSize,
       providerSizeParameters: image.providerSizeParameters,

@@ -3,18 +3,18 @@ import { MAX_WORKERS, poolConfig, type Pulse } from "../core/pool";
 import { queueWaitNotice, workerHealth } from "../core/workspace-state";
 import { configuration } from "../core/config";
 import { prepareCorrection } from "../core/prepare-correction";
-import { imageViewHtml } from "./views/image-html";
+import { imageViewHtml, imageViewVersion } from "./views/image-html";
 import { imageDetails } from "../core/image-details";
 import { galleryQuerySchema, queryGallery } from "../core/gallery-query";
-import { galleryViewHtml } from "./views/gallery-html";
+import { galleryViewHtml, galleryViewVersion } from "./views/gallery-html";
 import { ResourceTemplate } from "@modelcontextprotocol/server";
 import { storage } from "../storage";
 import type { Job } from "../core/schema";
 import { thumbnail } from "../sources/thumbnail";
-import { jobViewHtml } from "./views/job-html";
+import { jobViewHtml, jobViewVersion } from "./views/job-html";
 import { z } from "zod";
 import { idSchema } from "../core/schema";
-import { refreshedJob, refreshedJobs, service, enqueue } from "../core/runtime";
+import { refreshedJob, refreshedJobs, service, dispatch } from "../core/runtime";
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/server";
 import {
   getUiCapability,
@@ -22,41 +22,51 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 
-export const JOB_VIEW_URI = "ui://image-queue/job";
+// Hosts cache a view by its address and keep showing the old one after a
+// deployment, so each address carries the version of the view's content.
+export const JOB_VIEW_URI = `ui://image-queue/job-${jobViewVersion}`;
+export const GALLERY_VIEW_URI = `ui://image-queue/gallery-${galleryViewVersion}`;
+export const IMAGE_VIEW_URI = `ui://image-queue/image-${imageViewVersion}`;
 
 /** Register optional resources only after the host advertises MCP Apps. */
-export function configureAppViews(server: McpServer, tools: RegisteredTool[], galleryTool?: RegisteredTool, imageTool?: RegisteredTool) {
+export function configureAppViews(server: McpServer, tools: RegisteredTool[], galleryTool?: RegisteredTool, imageTool?: RegisteredTool, mode: "negotiate" | "always" = "negotiate", panelUrl?: string) {
+  if (mode === "always") return installAppViews(server, tools, galleryTool, imageTool, panelUrl);
   server.server.oninitialized = () => {
     const capability = getUiCapability(server.server.getClientCapabilities());
-    if (!capability?.mimeTypes?.includes(RESOURCE_MIME_TYPE)) return;
+    if (capability?.mimeTypes?.includes(RESOURCE_MIME_TYPE)) installAppViews(server, tools, galleryTool, imageTool, panelUrl);
+  };
+}
+
+function installAppViews(server: McpServer, tools: RegisteredTool[], galleryTool?: RegisteredTool, imageTool?: RegisteredTool, panelUrl?: string) {
+  {
     for (const tool of tools)
       tool.update({ _meta: { ui: { resourceUri: JOB_VIEW_URI } } });
     if (galleryTool) {
-      galleryTool.update({ _meta: { ui: { resourceUri: "ui://image-queue/gallery" } } });
+      galleryTool.update({ _meta: { ui: { resourceUri: GALLERY_VIEW_URI } } });
       server.registerTool("list_thumbnails", {
         description: "Read the next page of images for the gallery view",
         inputSchema: galleryQuerySchema.shape,
         _meta: { ui: { visibility: ["app"] } },
       }, async input => ({ content: [{ type: "text" as const, text: JSON.stringify(queryGallery(await refreshedJobs(), input)) }] }));
-      registerAppResource(server, "Image gallery", "ui://image-queue/gallery", {}, async () => ({
-        contents: [{ uri: "ui://image-queue/gallery", mimeType: RESOURCE_MIME_TYPE, text: galleryViewHtml,
+      registerAppResource(server, "Image gallery", GALLERY_VIEW_URI, {}, async () => ({
+        contents: [{ uri: GALLERY_VIEW_URI, mimeType: RESOURCE_MIME_TYPE, text: galleryViewHtml,
           _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } } }],
       }));
     }
     if (imageTool) {
-      imageTool.update({ _meta: { ui: { resourceUri: "ui://image-queue/image" } } });
-      registerAppResource(server, "Image notes and versions", "ui://image-queue/image", {}, async () => ({
-        contents: [{ uri: "ui://image-queue/image", mimeType: RESOURCE_MIME_TYPE, text: imageViewHtml,
+      imageTool.update({ _meta: { ui: { resourceUri: IMAGE_VIEW_URI } } });
+      registerAppResource(server, "Image notes and versions", IMAGE_VIEW_URI, {}, async () => ({
+        contents: [{ uri: IMAGE_VIEW_URI, mimeType: RESOURCE_MIME_TYPE, text: imageViewHtml,
           _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } } }],
       }));
     }
     server.registerTool("add_notes_to_queue", {
-      description: "Create one correction from the image's unsent notes after the user clicks Add to queue",
+      description: "Create one correction from the image's unsent notes after the user clicks Request next version",
       inputSchema: z.object({ imageId: idSchema, idempotencyKey: idSchema.max(96), instruction: z.string().trim().max(12000).optional() }),
       _meta: { ui: { visibility: ["app"] } },
     }, async input => {
       const job = await prepareCorrection(await service(), input);
-      await enqueue(job.id);
+      await dispatch(job.id);
       return { content: [{ type: "text" as const, text: JSON.stringify(job) }] };
     });
     server.registerTool("get_image_details", {
@@ -106,28 +116,36 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
         };
       },
     );
+    server.registerTool("read_image_file", {
+      description: "Read one finished image at full size so the inline view can hand it to the host as a download",
+      inputSchema: z.object({ id: idSchema }),
+      _meta: { ui: { visibility: ["app"] } },
+    }, async ({ id }) => {
+      const file = await readImageFile(id);
+      return { content: [{ type: "resource" as const, resource: {
+        uri: `image-queue://image/${file.name}`, mimeType: file.mime, blob: Buffer.from(file.bytes).toString("base64"),
+      } }] };
+    });
+    // Some hosts proxy a view's tool calls but read only the ui:// resource a tool names,
+    // so the views ask this tool first and keep the resource below as a fallback.
+    server.registerTool("read_thumbnail", {
+      description: "Read the preview of one finished image for an inline view. animated=true keeps the frames of a GIF.",
+      inputSchema: z.object({ id: idSchema, animated: z.boolean().optional() }),
+      _meta: { ui: { visibility: ["app"] } },
+    }, async ({ id, animated }) => {
+      const preview = await readThumbnail(id, { animated });
+      return { content: [
+        { type: "image" as const, data: Buffer.from(preview.bytes).toString("base64"), mimeType: preview.mime },
+        // The view offers Play when a GIF's frames did not survive the preview.
+        { type: "text" as const, text: JSON.stringify({ animated: preview.animated }) },
+      ] };
+    });
     server.registerResource(
       "image-thumbnail",
       new ResourceTemplate("image-queue://thumbnail/{id}", { list: undefined }),
       {},
       async (uri, variables) => {
-        const id = idSchema.parse(variables.id);
-        const store = await storage();
-        const job = await store.get<Job>("jobs", id);
-        if (!job || job.trashedAt || job.status !== "done")
-          throw new UserFacingError("Image is unavailable");
-        let blob = job.blobKey ? await store.getBlob(job.blobKey) : undefined;
-        if (!blob && job.source === "queue") {
-          const { queueOutput, configuredQueueRoot } = await import(
-            "../sources/queue"
-          );
-          blob = {
-            bytes: await queueOutput(await configuredQueueRoot(), job),
-            mime: "image/png",
-          };
-        }
-        if (!blob) throw new UserFacingError("Image is unavailable");
-        const preview = await thumbnail(blob.bytes, 640);
+        const preview = await readThumbnail(idSchema.parse(variables.id));
         return {
           contents: [
             {
@@ -151,18 +169,54 @@ export function configureAppViews(server: McpServer, tools: RegisteredTool[], ga
           {
             uri: JOB_VIEW_URI,
             mimeType: RESOURCE_MIME_TYPE,
-            text: jobViewHtml.replace("__IMAGE_QUEUE_DASHBOARD__", encodeURIComponent(dashboardUrl() ?? "")),
+            text: jobViewHtml.replace("__IMAGE_QUEUE_DASHBOARD__", encodeURIComponent(dashboardUrl(panelUrl) ?? "")),
             _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } },
           },
         ],
       }),
     );
-  };
+  }
 }
 
-function dashboardUrl() {
+const extensions: Record<string, string> = {
+  "image/png": "png", "image/webp": "webp", "image/jpeg": "jpg", "image/gif": "gif", "image/svg+xml": "svg",
+};
+
+/** The full-size file of a finished image that is not in Trash, named after its ID. */
+export async function readImageFile(id: string) {
+  const store = await storage();
+  const job = await store.get<Job>("jobs", id);
+  if (!job || job.trashedAt || job.status !== "done" || !job.blobKey) throw new UserFacingError("Image is unavailable");
+  const blob = await store.getBlob(job.blobKey);
+  if (!blob) throw new UserFacingError("Image is unavailable");
+  const mime = extensions[blob.mime] ? blob.mime : "image/png";
+  return { bytes: blob.bytes, mime, name: `${job.id}.${extensions[mime]}` };
+}
+
+/**
+ * Render the preview of a finished image that is not in Trash: 640 px, or a
+ * 480 px animation when the frames of a GIF are asked for (the smaller width
+ * keeps an eight-frame preview quick to load through the host).
+ */
+export async function readThumbnail(id: string, options: { animated?: boolean } = {}) {
+  const store = await storage();
+  const job = await store.get<Job>("jobs", id);
+  if (!job || job.trashedAt || job.status !== "done")
+    throw new UserFacingError("Image is unavailable");
+  let blob = job.blobKey ? await store.getBlob(job.blobKey) : undefined;
+  if (!blob && job.source === "queue") {
+    const { queueOutput, configuredQueueRoot } = await import("../sources/queue");
+    blob = { bytes: await queueOutput(await configuredQueueRoot(), job), mime: "image/png" };
+  }
+  if (!blob) throw new UserFacingError("Image is unavailable");
+  const animated = Boolean(options.animated) && (job.outputFormat === "gif" || blob.mime === "image/gif");
+  return animated ? thumbnail(blob.bytes, 480, { animated: true }) : thumbnail(blob.bytes, 640);
+}
+
+/** The panel the views link to: the configured URL, else the origin that served the MCP request, else the local default. */
+function dashboardUrl(panelUrl?: string) {
   try {
-    const url = new URL(configuration("DASHBOARD_URL") ?? "http://127.0.0.1:3215");
+    const url = new URL(configuration("DASHBOARD_URL") ?? panelUrl ?? "http://127.0.0.1:3215");
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return;
     url.search = "";
     url.hash = "";

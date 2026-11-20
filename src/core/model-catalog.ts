@@ -17,3 +17,4 @@ export function modelsWithSizeProfiles(models: Model[]): Model[] {
       return rank(a) - rank(b);
     });
 }
+

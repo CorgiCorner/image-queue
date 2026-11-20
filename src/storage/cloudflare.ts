@@ -1,5 +1,8 @@
 import { StorageLockBusy, type Storage, safeKey } from "./types";
 
+/** Lock lease, longer than the 15-minute queue consumer limit. */
+export const lockLease = 20 * 60 * 1000;
+
 interface Database {
   prepare(sql: string): {
     bind(...args: unknown[]): {
@@ -54,11 +57,20 @@ export class CloudflareStorage implements Storage {
       .bind(safeKey(collection), safeKey(id)).run();
   }
   async lock<T>(key: string, work: () => Promise<T>) {
+    const id = safeKey(key);
     const token = crypto.randomUUID();
+    const now = Date.now();
+    // A Worker killed while holding a lock never reaches finally; its lease
+    // lets the next caller take over. The lease outlasts a queue consumer's
+    // 15-minute limit, so a live holder never loses its lock.
+    await this.db
+      .prepare("DELETE FROM locks WHERE id=? AND expires_at IS NOT NULL AND expires_at<?")
+      .bind(id, now)
+      .run();
     try {
       await this.db
-        .prepare("INSERT INTO locks(id,token) VALUES(?,?)")
-        .bind(safeKey(key), token)
+        .prepare("INSERT INTO locks(id,token,expires_at) VALUES(?,?,?)")
+        .bind(id, token, now + lockLease)
         .run();
     } catch {
       throw new StorageLockBusy(key);
@@ -68,7 +80,7 @@ export class CloudflareStorage implements Storage {
     } finally {
       await this.db
         .prepare("DELETE FROM locks WHERE id=? AND token=?")
-        .bind(key, token)
+        .bind(id, token)
         .run();
     }
   }

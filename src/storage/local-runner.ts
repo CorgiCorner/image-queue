@@ -126,7 +126,7 @@ export async function startLocalRunner(store:Storage):Promise<LocalRunner|undefi
     const settings=await sourceControls(store,'queue');
     armResume(!settings.paused?settings.resumeAt:undefined);
    },
-   report:()=>console.error('Local image execution requires attention.'),
+   report:error=>console.error('Local image execution requires attention.',error instanceof Error?`${error.name}: ${error.message}`:''),
   });
   stopWatching=watchQueue(paths.queueDirectory,()=>executor?.wake());
   paused=paused||await globalPause(store);

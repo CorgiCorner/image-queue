@@ -41,6 +41,16 @@ export const requestSchema = z.object({
   width: z.number().int().min(256).max(4096),
   height: z.number().int().min(256).max(4096),
   transparent: z.boolean().default(false),
+  /** OpenAI Image API rendering quality; API requests only. */
+  quality: z.enum(["low", "medium", "high", "xhigh", "max", "auto"]).optional(),
+  /** OpenAI Image API planning effort (GPT Image 2.6); API requests only. */
+  complexity: z.enum(["low", "medium", "high"]).optional(),
+  /** OpenAI Image API output format. Omitted requests are stored as PNG. API requests only. */
+  outputFormat: z.enum(["png", "webp", "jpeg", "gif", "svg"]).optional(),
+  /** Animated GIF frame count (2–16). API requests only, and only with GIF output. */
+  frameCount: z.number().int().min(2).max(16).optional(),
+  /** Animated GIF frame duration in milliseconds (20–2000). API requests only, and only with GIF output. */
+  frameDurationMs: z.number().int().min(20).max(2000).optional(),
   referenceIds: z
     .array(idSchema)
     .max(10)
@@ -117,6 +127,16 @@ export type Model = {
   provider: Provider;
   references: boolean;
   transparency: boolean;
+  /** Accepted `quality` values; present only for models with a verified profile. */
+  qualities?: import("./model-profiles").ImageQuality[];
+  /** Accepted `complexity` values; empty when the model has no complexity setting. */
+  complexities?: import("./model-profiles").ImageComplexity[];
+  /** Formats an API request can ask for. The result is stored in that format; omitted requests are PNG. */
+  outputFormats?: string[];
+  /** Capabilities stated by official documentation but not yet confirmed by a generation receipt. */
+  documentedOnly?: string[];
+  /** Whether a paid generation receipt backs this profile; false when it rests on documentation alone. */
+  generationVerified?: boolean;
 };
 export const settingsSchema = z.object({
   provider: z.enum(["openai", "google", "gateway", "openrouter"]),

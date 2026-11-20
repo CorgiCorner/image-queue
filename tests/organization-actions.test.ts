@@ -3,6 +3,7 @@ import { MemoryStorage } from "../src/storage/memory";
 const state = vi.hoisted(() => ({
   store: undefined as unknown as MemoryStorage,
   enqueue: vi.fn(),
+  dispatch: vi.fn(),
   after: vi.fn(),
   configuredQueueRoot: vi.fn(async () => "/tmp/fixture-queue"),
 }));
@@ -19,6 +20,7 @@ vi.mock("../src/core/runtime", async () => {
   return {
     service: async () => new ImageService(state.store),
     enqueue: state.enqueue,
+    dispatch: state.dispatch,
   };
 });
 import * as actions from "../src/actions";
@@ -252,21 +254,10 @@ it.each(["disk", "cloudflare"])("dispatches an API iteration using the %s lifecy
     expect(state.after).not.toHaveBeenCalled();
     return;
   }
+  // Cloudflare hands the job to its generation queue; failure recording is covered by the dispatch tests.
+  expect(state.dispatch).toHaveBeenCalledExactlyOnceWith("IMG-api-iteration");
   expect(state.enqueue).not.toHaveBeenCalled();
-  expect(state.after).toHaveBeenCalledOnce();
-  await state.after.mock.calls[0][0]();
-  expect(state.enqueue).toHaveBeenCalledExactlyOnceWith("IMG-api-iteration");
-
-  state.enqueue.mockRejectedValueOnce(new Error("Provider is disconnected"));
-  await state.after.mock.calls[0][0]();
-  expect(await state.store.get("jobs", "IMG-api-iteration")).toMatchObject({
-    status: "failed", error: "Generation failed", parentVersionId: "one",
-  });
-  const current = await state.store.get<Record<string, unknown>>("jobs", "IMG-api-iteration");
-  await state.store.put("jobs", "IMG-api-iteration", { ...current, status: "done", error: undefined });
-  state.enqueue.mockRejectedValueOnce(new Error("Late failure"));
-  await state.after.mock.calls[0][0]();
-  expect(await state.store.get("jobs", "IMG-api-iteration")).toMatchObject({ status: "done" });
+  expect(state.after).not.toHaveBeenCalled();
 });
 
 it("rejects external-file deletion from Cloudflare before touching any record", async () => {

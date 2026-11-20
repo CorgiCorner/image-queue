@@ -16,6 +16,7 @@ export class CompactApp {
   onteardown?: () => unknown;
   private rpc?: ParentRpc;
   private context?: HostContext;
+  private capabilities?: { downloadFile?: object };
   private resize?: ResizeObserver;
 
   constructor(
@@ -34,6 +35,8 @@ export class CompactApp {
       if (!result || typeof result !== "object" || !("protocolVersion" in result) ||
           typeof result.protocolVersion !== "string" || !supportedVersions.has(result.protocolVersion))
         throw new Error("Unsupported MCP Apps protocol");
+      this.capabilities = ("hostCapabilities" in result && result.hostCapabilities && typeof result.hostCapabilities === "object")
+        ? result.hostCapabilities as { downloadFile?: object } : undefined;
       this.context = ("hostContext" in result && result.hostContext && typeof result.hostContext === "object")
         ? result.hostContext as HostContext : undefined;
       rpc.notify("ui/notifications/initialized");
@@ -79,6 +82,8 @@ export class CompactApp {
   }
 
   getHostContext() { return this.context; }
+  /** True when the host saves files a view hands it (ui/download-file). */
+  canDownloadFiles() { return Boolean(this.capabilities?.downloadFile); }
 
   private async request<T>(method: string, params: unknown) {
     if (!this.rpc) throw new Error("MCP Apps connection is unavailable");
@@ -90,6 +95,9 @@ export class CompactApp {
   }
   readServerResource(params: Parameters<SdkApp["readServerResource"]>[0]) {
     return this.request<Awaited<ReturnType<SdkApp["readServerResource"]>>>("resources/read", params);
+  }
+  downloadFile(params: { contents: { type: "resource"; resource: { uri: string; mimeType: string; blob: string } }[] }) {
+    return this.request<{ isError?: boolean }>("ui/download-file", params);
   }
   openLink(params: Parameters<SdkApp["openLink"]>[0]) {
     return this.request<Awaited<ReturnType<SdkApp["openLink"]>>>("ui/open-link", params);
@@ -111,4 +119,15 @@ export function applyHostStyleVariables(variables: Record<string, string | undef
   for (const [name, value] of Object.entries(variables)) {
     if (name.startsWith("--") && typeof value === "string") document.documentElement.style.setProperty(name, value);
   }
+}
+
+/** Loads the host's fonts (@font-face or @import rules) so --font-sans resolves to the host's typeface. */
+export function applyHostFonts(css: string) {
+  let style = document.querySelector<HTMLStyleElement>("style[data-host-fonts]");
+  if (!style) {
+    style = document.createElement("style");
+    style.dataset.hostFonts = "";
+    document.head.prepend(style);
+  }
+  if (style.textContent !== css) style.textContent = css;
 }

@@ -1,5 +1,6 @@
 import { layout } from "../../core/layout";
-import { CompactApp, applyDocumentTheme, applyHostStyleVariables } from "./compact-app";
+import { CompactApp, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } from "./compact-app";
+import { loadThumbnail } from "./thumbnail";
 
 const app = new CompactApp({ name: "image-queue-gallery", version: "1.0.0" });
 const grid = document.querySelector<HTMLElement>("#gallery")!;
@@ -169,15 +170,11 @@ function fetchPreview(id: string) {
   const pending = pendingPreviews.get(id);
   if (pending) return pending;
   const requestGeneration = generation;
-  const request = app.readServerResource({ uri: `image-queue://thumbnail/${encodeURIComponent(id)}` })
-    .then(resource => {
+  const request = loadThumbnail(app, id, () => disposed)
+    .then(url => {
       if (disposed || generation !== requestGeneration) return;
-      const asset = resource.contents.find(value => "blob" in value);
-      if (asset && "blob" in asset && asset.mimeType?.startsWith("image/")) {
-        const url = `data:${asset.mimeType};base64,${asset.blob}`;
-        rememberPreview(id, url);
-        return url;
-      }
+      rememberPreview(id, url);
+      return url;
     })
     .finally(() => {
       if (pendingPreviews.get(id) === request) pendingPreviews.delete(id);
@@ -309,6 +306,7 @@ app.onhostcontextchanged = context => {
   updateDisplayMode(context);
   if (context.theme) applyDocumentTheme(context.theme);
   if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
 };
 app.onteardown = async () => { disposed = true; generation++; resizeObserver.disconnect(); window.removeEventListener("scroll", positionImages); viewport?.removeEventListener("scroll", positionImages); cardsById.clear(); items.clear(); orderedItems = []; positions.clear(); clearPreviews(); selected.clear(); geometry = undefined; grid.replaceChildren(); return {}; };
 app.connect().then(() => {
@@ -317,4 +315,5 @@ app.connect().then(() => {
   if (context) updateDisplayMode(context);
   if (context?.theme) applyDocumentTheme(context.theme);
   if (context?.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context?.styles?.css?.fonts) applyHostFonts(context?.styles.css.fonts);
 }).catch(() => { if (!disposed) status.textContent = "Unable to connect to the host."; });

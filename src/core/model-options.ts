@@ -6,6 +6,17 @@ export function modelSizes(provider: Provider, model: string, profile?: SizeProf
   if (profile?.mode === "fixed") {
     return profile.sizes.map(({ width, height }) => `${width}x${height}`);
   }
+  if (profile?.mode === "dimensions") {
+    // Offer each standard ratio at a size the model renders natively, so no crop is needed.
+    return [...new Set(aspectRatios.flatMap(aspectRatio => {
+      try {
+        const { target } = resolveModelSize(profile, { aspectRatio });
+        return [`${target.width}x${target.height}`];
+      } catch {
+        return [];
+      }
+    }))];
+  }
   if (profile) {
     return queueSizes.filter(size => {
       const [width, height] = size.split("x").map(Number);
