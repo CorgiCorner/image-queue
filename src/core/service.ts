@@ -140,8 +140,14 @@ export class ImageService {
         if (sizeProfile) {
           const resolved = resolveModelSize(sizeProfile, parsed);
           const native = /^(\d+)x(\d+)$/.exec(String((resolved.parameters as { size?: string }).size ?? ""));
-          if ((parsed.outputFormat ?? "png") === "gif" && native)
+          if ((parsed.outputFormat ?? "png") === "gif" && native) {
             assertGifSheetFits(sizeProfile, { width: Number(native[1]), height: Number(native[2]) }, parsed.frameCount);
+            // The Worker cannot scale an animated GIF, so it is generated at a size the model renders.
+            if (resolved.requiresResize && parsed.exactDimensions !== false && configuration("STORAGE_DRIVER") === "cloudflare")
+              throw new UserFacingError(
+                `This server cannot resize an animated GIF, and the model renders ${parsed.width}x${parsed.height} as ${native[1]}x${native[2]}. ` +
+                `Request ${native[1]}x${native[2]}, or pass only aspectRatio. Nothing was sent or billed.`);
+          }
         }
         const profile = applyVerifiedModelProfiles(stored).find(model => model.id === parsed.model);
         if (profile) assertModelOptions(profile, parsed);

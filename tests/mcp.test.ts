@@ -942,8 +942,6 @@ it("rejects an output format the source or model cannot use before creating any 
     const reference = await api.addReference(project.id, "ref.png", "image/png", png);
     await expect(call("request_image", { ...base, outputFormat: "svg", referenceIds: [reference.id], idempotencyKey: "svg-ref" }))
       .rejects.toThrow("cannot be combined with reference images");
-    await expect(call("request_image", { ...base, outputFormat: "gif", referenceIds: [reference.id], idempotencyKey: "gif-ref" }))
-      .rejects.toThrow("GIF output with reference images is not supported by this application yet.");
     await expect(call("request_image", { ...base, outputFormat: "svg", frameCount: 4, idempotencyKey: "svg-frames" }))
       .rejects.toThrow("only to GIF");
     await expect(call("request_image", { ...base, outputFormat: "png", frameDurationMs: 200, idempotencyKey: "png-frames" }))

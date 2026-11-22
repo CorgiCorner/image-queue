@@ -67,7 +67,7 @@ describe("image requests", () => {
     await expect(service.create({ ...input, frameDurationMs: 200 })).rejects.toThrow("Output format and frame settings apply only to API generation");
     expect(await service.jobs()).toEqual([]);
   });
-  it("refuses GIF output with reference images before storing a job", async () => {
+  it("accepts GIF output with reference images", async () => {
     const project = await service.createProject("GIF");
     await service.store.put("models", "openai", [{
       id: "gpt-image-2.6-sunburst", provider: "openai", name: "Sunburst",
@@ -78,8 +78,7 @@ describe("image requests", () => {
     await expect(service.create({
       ...request(project.id), source: "api", model: "gpt-image-2.6-sunburst", transparent: false,
       outputFormat: "gif", referenceIds: [reference.id],
-    })).rejects.toThrow("GIF output with reference images is not supported by this application yet.");
-    expect(await service.jobs()).toEqual([]);
+    })).resolves.toMatchObject({ outputFormat: "gif", referenceIds: [reference.id] });
   });
   it("requires a project and model for API requests", async () => {
     await expect(service.create(request("missing"))).rejects.toThrow("Project");

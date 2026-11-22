@@ -33,7 +33,7 @@ it("rejects an imported GIF and any SVG, which have no prompt to generate again 
   await expect(prepareCorrection(api, { imageId: job.id, idempotencyKey: "svg" })).rejects.toThrow("cannot be used as references");
   expect(await store.list("references")).toEqual([]);
 });
-it("generates a GIF again from its prompt with the requested changes, without references", async () => {
+it("generates a GIF again from its prompt with the requested changes", async () => {
   const store = new MemoryStorage();
   const api = new ImageService(store);
   const project = await api.createProject("Test");
@@ -252,4 +252,22 @@ it("includes the current region in v2 and reuses only the original for a text ed
   expect((await prepareCorrection(api,input)).id).toBe(version.id);
   const plain = await prepareCorrection(api,{...input,idempotencyKey:"plain-edit",selection:undefined});
   expect(plain.referenceIds).toHaveLength(1);
+});
+
+it("keeps the original GIF's references in its next version, skipping deleted ones", async () => {
+  const store = new MemoryStorage();
+  const api = new ImageService(store);
+  const project = await api.createProject("Test");
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: "white" } }).png().toBuffer();
+  const { job } = await api.importImage("image.png", "image/png", png, project.id);
+  const character = await api.addReference(project.id, "cat.png", "image/png", png);
+  await store.put("jobs", job.id, { ...job, imported: false, source: "api" as const, provider: "openai" as const, model: "gpt-image-2.6-sunburst",
+    prompt: "The cat hides under a blanket", outputFormat: "gif" as const, frameCount: 12, width: 816, height: 816,
+    referenceIds: [character.id, "00000000-0000-4000-8000-000000000000"] });
+  await store.put("settings", "provider-openai", { id: "provider-openai" });
+  const key = vi.spyOn(await import("../src/core/settings"), "readKey").mockResolvedValue("test-key");
+  await addNote(store, { imageId: job.id, text: "Roll out to the left" });
+  const next = await prepareCorrection(api, { imageId: job.id, idempotencyKey: "cat-v2" });
+  expect(next).toMatchObject({ referenceIds: [character.id], outputFormat: "gif", frameCount: 12 });
+  key.mockRestore();
 });

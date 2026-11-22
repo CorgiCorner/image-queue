@@ -176,8 +176,6 @@ export function assertModelOptions(
     throw new UserFacingError("Transparent background requires PNG or WebP output.");
   if (format === "svg" && request.referenceIds?.length)
     throw new UserFacingError("SVG output cannot be combined with reference images.");
-  if (format === "gif" && request.referenceIds?.length)
-    throw new UserFacingError("GIF output with reference images is not supported by this application yet.");
   if ((request.frameCount !== undefined || request.frameDurationMs !== undefined) && format !== "gif")
     throw new UserFacingError("Frame count and duration apply only to GIF output.");
 }

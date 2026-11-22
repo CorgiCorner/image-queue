@@ -108,7 +108,7 @@ it("refuses an output format, transparency pairing, SVG combination or frame set
   expect(() => assertModelOptions(vector, { transparent: true, outputFormat: "webp" })).not.toThrow();
   expect(() => assertModelOptions(vector, { transparent: true })).not.toThrow();
   expect(() => assertModelOptions(vector, { outputFormat: "svg", referenceIds: ["ref-1"] })).toThrow("cannot be combined with reference images");
-  expect(() => assertModelOptions(vector, { outputFormat: "gif", referenceIds: ["ref-1"] })).toThrow("GIF output with reference images is not supported by this application yet.");
+  expect(() => assertModelOptions(vector, { outputFormat: "gif", referenceIds: ["ref-1"] })).not.toThrow();
   expect(() => assertModelOptions(vector, { outputFormat: "gif", frameCount: 4 })).not.toThrow();
   expect(() => assertModelOptions(vector, { outputFormat: "svg", frameCount: 4 })).toThrow("only to GIF");
   expect(() => assertModelOptions(vector, { outputFormat: "png", frameDurationMs: 200 })).toThrow("only to GIF");

@@ -957,7 +957,7 @@ export function Workspace({
       : unique;
   }, [selectedModel]);
   const vectorFormats = orderedFormats.some(value => value === "gif" || value === "svg");
-  const formatBlocked = (value: string) => (value === "gif" || value === "svg") && (transparent || refs.length > 0);
+  const formatBlocked = (value: string) => ((value === "gif" || value === "svg") && transparent) || (value === "svg" && refs.length > 0);
   useEffect(() => {
     if (source !== "api" && Number(variants) > 4) setVariants("4");
   }, [source, variants]);
@@ -977,11 +977,11 @@ export function Workspace({
     : outputFormat === "gif" || outputFormat === "svg"
       ? "Transparent background is available with PNG or WebP output."
       : transparent && refs.length
-        ? "Transparent background requires PNG or WebP output. GIF output with reference images is not supported by this application yet. SVG output cannot be combined with reference images."
+        ? "Transparent background requires PNG or WebP output. SVG output cannot be combined with reference images."
         : transparent
           ? "Transparent background requires PNG or WebP output."
           : refs.length
-            ? "GIF output with reference images is not supported by this application yet. SVG output cannot be combined with reference images."
+            ? "SVG output cannot be combined with reference images."
             : "";
   const referencesById = useMemo(() => new Map(data.references.map(reference => [reference.id, reference])), [data.references]);
   const selectedRefs = refs.flatMap(id => {

@@ -8,7 +8,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/server";
 const READ_ONLY = new Set([
   "get_generation_source", "get_queue_processing", "list_projects", "list_jobs", "show_image", "show_images", "view_image",
   "get_job", "show_job", "wait_for_job", "list_models", "list_topics", "list_untagged", "list_notes",
-  "list_thumbnails", "get_image_details", "get_job_state", "read_thumbnail", "read_image_file",
+  "list_thumbnails", "get_image_details", "get_job_state", "read_thumbnail", "read_image_file", "upload_reference",
 ]);
 
 /** Tools that cancel or end work, so hosts keep asking before they run. */

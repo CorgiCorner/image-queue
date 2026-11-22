@@ -10,8 +10,10 @@ import { galleryViewHtml, galleryViewVersion } from "./views/gallery-html";
 import { ResourceTemplate } from "@modelcontextprotocol/server";
 import { storage } from "../storage";
 import type { Job } from "../core/schema";
+import { hasSavedResult } from "../core/job-status";
 import { thumbnail } from "../sources/thumbnail";
 import { jobViewHtml, jobViewVersion } from "./views/job-html";
+import { referenceViewHtml, referenceViewVersion } from "./views/reference-html";
 import { z } from "zod";
 import { idSchema } from "../core/schema";
 import { refreshedJob, refreshedJobs, service, dispatch } from "../core/runtime";
@@ -27,6 +29,7 @@ import {
 export const JOB_VIEW_URI = `ui://image-queue/job-${jobViewVersion}`;
 export const GALLERY_VIEW_URI = `ui://image-queue/gallery-${galleryViewVersion}`;
 export const IMAGE_VIEW_URI = `ui://image-queue/image-${imageViewVersion}`;
+export const REFERENCE_VIEW_URI = `ui://image-queue/reference-${referenceViewVersion}`;
 
 /** Register optional resources only after the host advertises MCP Apps. */
 export function configureAppViews(server: McpServer, tools: RegisteredTool[], galleryTool?: RegisteredTool, imageTool?: RegisteredTool, mode: "negotiate" | "always" = "negotiate", panelUrl?: string) {
@@ -60,6 +63,35 @@ function installAppViews(server: McpServer, tools: RegisteredTool[], galleryTool
           _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } } }],
       }));
     }
+    // Claude passes only text to a tool, never a file attached to the chat, so
+    // the user hands the image to this card, which uploads it through the host.
+    server.registerTool("upload_reference", {
+      description: "Show a card in which the user chooses, drops or pastes an image from their computer or phone to use as a reference in projectId. Use it whenever the user attached an image to the conversation and wants it as a reference: an attached file cannot be passed to image-queue, so ask the user to pick the same image in the card. Also use it on the hosted server, where add_reference cannot read local files. The card sends the new referenceId back as a message; wait for it, then pass it in referenceIds.",
+      inputSchema: { projectId: idSchema },
+      _meta: { ui: { resourceUri: REFERENCE_VIEW_URI } },
+    }, async ({ projectId }) => {
+      const api = await service();
+      if (projectId !== "inbox" && !(await api.store.get("projects", projectId))) throw new UserFacingError("Project does not exist");
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projectId, next: "Ask the user to choose the image in the card. The card replies with its referenceId." }) }] };
+    });
+    server.registerTool("save_uploaded_reference", {
+      description: "Store one image the user chose in the reference upload card",
+      inputSchema: z.object({
+        projectId: idSchema,
+        name: z.string().trim().min(1).max(200),
+        mime: z.enum(["image/png", "image/jpeg", "image/webp"]),
+        // 20 MB as base64.
+        data: z.string().min(1).max(28_000_000),
+      }),
+      _meta: { ui: { visibility: ["app"] } },
+    }, async ({ projectId, name, mime, data }) => {
+      const reference = await (await service()).addReference(projectId, name, mime, new Uint8Array(Buffer.from(data, "base64")));
+      return { content: [{ type: "text" as const, text: JSON.stringify({ id: reference.id, name: reference.name, projectId: reference.projectId, mime: reference.mime }) }] };
+    });
+    registerAppResource(server, "Upload reference", REFERENCE_VIEW_URI, {}, async () => ({
+      contents: [{ uri: REFERENCE_VIEW_URI, mimeType: RESOURCE_MIME_TYPE, text: referenceViewHtml,
+        _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } } }],
+    }));
     server.registerTool("add_notes_to_queue", {
       description: "Create one correction from the image's unsent notes after the user clicks Request next version",
       inputSchema: z.object({ imageId: idSchema, idempotencyKey: idSchema.max(96), instruction: z.string().trim().max(12000).optional() }),
@@ -186,7 +218,7 @@ const extensions: Record<string, string> = {
 export async function readImageFile(id: string) {
   const store = await storage();
   const job = await store.get<Job>("jobs", id);
-  if (!job || job.trashedAt || job.status !== "done" || !job.blobKey) throw new UserFacingError("Image is unavailable");
+  if (!job || job.trashedAt || !hasSavedResult(job) || !job.blobKey) throw new UserFacingError("Image is unavailable");
   const blob = await store.getBlob(job.blobKey);
   if (!blob) throw new UserFacingError("Image is unavailable");
   const mime = extensions[blob.mime] ? blob.mime : "image/png";
@@ -201,7 +233,7 @@ export async function readImageFile(id: string) {
 export async function readThumbnail(id: string, options: { animated?: boolean } = {}) {
   const store = await storage();
   const job = await store.get<Job>("jobs", id);
-  if (!job || job.trashedAt || job.status !== "done")
+  if (!job || job.trashedAt || !hasSavedResult(job))
     throw new UserFacingError("Image is unavailable");
   let blob = job.blobKey ? await store.getBlob(job.blobKey) : undefined;
   if (!blob && job.source === "queue") {

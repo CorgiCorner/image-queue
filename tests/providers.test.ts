@@ -526,3 +526,34 @@ it.each([null, { data: "private-catalog-value" }, { data: [null] }, { models: [{
     await expect(discoverModels("openai", "key")).rejects.toThrow("The provider returned an unreadable model list. Try again later.");
   },
 );
+
+it("sends a GIF with reference images to the edits endpoint with its frame settings", async () => {
+  const gif = new TextEncoder().encode("GIF89a-animation");
+  vi.mocked(imageSize).mockImplementation(bytes => bytes[0] === 0x47
+    ? { width: 768, height: 768, type: "gif" }
+    : { width: 1024, height: 1024, type: "png" });
+  const fetch = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: [{ b64_json: Buffer.from(gif).toString("base64") }], usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 } }),
+  }));
+  vi.stubGlobal("fetch", fetch);
+  vi.mocked(generateImage).mockClear();
+  const result = await generate({
+    provider: "openai", model: "gpt-image-2.6-sunburst", prompt: "The cat hides under a blanket",
+    width: 768, height: 768, transparent: false, outputFormat: "gif", frameCount: 12, frameDurationMs: 150, quality: "medium",
+  } as Job, "key", [new Uint8Array([1, 2]), new Uint8Array([3, 4])]);
+  expect(generateImage).not.toHaveBeenCalled();
+  const [url, init] = fetch.mock.calls[0] as unknown as [string, { body: FormData; headers: Record<string, string> }];
+  expect(url).toBe("https://api.openai.com/v1/images/edits");
+  expect(init.headers).toEqual({ Authorization: "Bearer key" });
+  const form = init.body;
+  expect(Object.fromEntries(["model", "prompt", "n", "size", "output_format", "frame_count", "frame_duration_ms", "quality"].map(key => [key, form.get(key)]))).toEqual({
+    model: "gpt-image-2.6-sunburst", prompt: "The cat hides under a blanket", n: "1", size: "768x768",
+    output_format: "gif", frame_count: "12", frame_duration_ms: "150", quality: "medium",
+  });
+  const images = form.getAll("image[]") as File[];
+  expect(images.map(image => [image.name, image.type])).toEqual([["reference-1.png", "image/png"], ["reference-2.png", "image/png"]]);
+  expect(result).toMatchObject({ mime: "image/gif", width: 768, height: 768, usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 } });
+  expect(result.adaptationError).toBeUndefined();
+});

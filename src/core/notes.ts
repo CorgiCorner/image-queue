@@ -224,6 +224,12 @@ export async function createCorrection(
         throw new UserFacingError("Could not verify the original image's transparency. Re-import it before editing.");
       transparent = actual;
     }
+    // A regenerated animation keeps the references the original followed, so
+    // the character stays the same; references deleted since then are skipped.
+    const keptReferences = regenerate && !intent?.request
+      ? (await Promise.all((original.referenceIds ?? []).map(async id =>
+          (await api.store.get("references", id)) ? id : undefined))).filter((id): id is string => Boolean(id))
+      : [];
     const request = intent?.request ?? {
       projectId: original.projectId,
       topicId: original.topicId,
@@ -249,7 +255,7 @@ export async function createCorrection(
         quality: original.quality, complexity: original.complexity, outputFormat: original.outputFormat,
         frameCount: original.frameCount, frameDurationMs: original.frameDurationMs,
       } : {}),
-      referenceIds: input.referenceIds,
+      referenceIds: regenerate ? keptReferences : input.referenceIds,
       idempotencyKey: input.idempotencyKey,
     };
     if (request.prompt.length > 12000)
