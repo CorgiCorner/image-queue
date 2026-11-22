@@ -9,7 +9,7 @@ export async function addLocalReference(
   filePath: string,
 ) {
   if (configuration("STORAGE_DRIVER") === "cloudflare")
-    throw new UserFacingError("Local files require the local MCP server");
+    throw new UserFacingError("The hosted image-queue cannot read local files or files attached to the chat. Call upload_reference so the user can choose the image in a card.");
   const { pathSettings } = await import("../core/paths");
   const roots = (await pathSettings(api.store)).referenceDirectories;
   const file = await realpath(filePath);

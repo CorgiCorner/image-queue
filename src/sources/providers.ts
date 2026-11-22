@@ -137,17 +137,21 @@ export async function generate(
   const providerOptions: Parameters<typeof generateImage>[0]["providerOptions"] = job.resolution && job.provider === "google"
     ? { google: { imageConfig: { imageSize: job.resolution } } }
     : Object.keys(openaiOptions).length ? { openai: openaiOptions } : undefined;
-  const result = await generateImage({
-    model,
-    prompt: references.length
-      ? { text: job.prompt, images: references }
-      : job.prompt,
-    size: sizeParameters.size,
-    aspectRatio: sizeParameters.aspectRatio,
-    maxRetries: 0,
-    abortSignal: AbortSignal.timeout(240000),
-    providerOptions,
-  });
+  // The SDK's edit request drops GIF output and frame settings, so a GIF that
+  // follows reference images goes to the edits endpoint directly.
+  const result = rasterFormat === "gif" && references.length
+    ? await editGif(job, key, sizeParameters.size, references)
+    : await generateImage({
+      model,
+      prompt: references.length
+        ? { text: job.prompt, images: references }
+        : job.prompt,
+      size: sizeParameters.size,
+      aspectRatio: sizeParameters.aspectRatio,
+      maxRetries: 0,
+      abortSignal: AbortSignal.timeout(240000),
+      providerOptions,
+    });
   const generatedDimensions = imageSize(result.image.uint8Array);
   let bytes = result.image.uint8Array;
   let mime = mimeOf(bytes);
@@ -201,29 +205,37 @@ function mimeOf(bytes: Uint8Array) {
   throw new UserFacingError("The provider returned an unreadable image. Try again later.");
 }
 
-/** SVG is rejected by the installed SDK schema, and the edits endpoint cannot return it. */
-async function generateSvg(job: Job, key: string, size: `${number}x${number}` | undefined, referenceCount: number) {
-  if (job.provider !== "openai")
-    throw new UserFacingError("SVG output requires an OpenAI image model");
-  if (referenceCount)
-    throw new UserFacingError("SVG output cannot be combined with reference images.");
-  if (!size) throw new UserFacingError("SVG output requires a pixel size.");
-  const [width, height] = size.split("x").map(Number);
-  if (!width || !height) throw new UserFacingError("SVG output requires a pixel size.");
-  const body = {
-    model: job.model,
-    prompt: job.prompt,
-    n: 1,
-    size,
-    output_format: "svg",
-    ...(job.quality ? { quality: job.quality } : {}),
-    ...(job.complexity ? { complexity: job.complexity } : {}),
-    ...(job.transparent ? { background: "transparent" } : {}),
-  };
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
+/** An animated GIF guided by reference images, from POST /v1/images/edits. */
+async function editGif(job: Job, key: string, size: `${number}x${number}` | undefined, references: Uint8Array[]) {
+  if (!size) throw new UserFacingError("GIF output requires a pixel size.");
+  const form = new FormData();
+  form.append("model", job.model);
+  form.append("prompt", job.prompt);
+  form.append("n", "1");
+  form.append("size", size);
+  form.append("output_format", "gif");
+  if (job.frameCount !== undefined) form.append("frame_count", String(job.frameCount));
+  if (job.frameDurationMs !== undefined) form.append("frame_duration_ms", String(job.frameDurationMs));
+  if (job.quality) form.append("quality", job.quality);
+  if (job.complexity) form.append("complexity", job.complexity);
+  const field = references.length === 1 ? "image" : "image[]";
+  references.forEach((bytes, index) => {
+    const mime = mimeOf(bytes);
+    const extension = mime === outputMime.jpeg ? "jpg" : mime === outputMime.webp ? "webp" : "png";
+    form.append(field, new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime }), `reference-${index + 1}.${extension}`);
+  });
+  const payload = await postImageRequest("https://api.openai.com/v1/images/edits", key, form);
+  return { image: { uint8Array: payload.bytes }, usage: payload.usage };
+}
+
+/** Send one image request outside the SDK and return the first image's bytes and token usage. */
+async function postImageRequest(url: string, key: string, body: FormData | object) {
+  const response = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: body instanceof FormData
+      ? { Authorization: `Bearer ${key}` }
+      : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: body instanceof FormData ? body : JSON.stringify(body),
     signal: AbortSignal.timeout(240000),
   }).catch(() => {
     throw new UserFacingError("Could not reach the provider. Check your connection and try again.");
@@ -243,6 +255,11 @@ async function generateSvg(job: Job, key: string, size: `${number}x${number}` | 
   });
   const parsed = z.object({
     data: z.array(z.object({ b64_json: z.string().min(1) })).min(1),
+    usage: z.object({
+      input_tokens: z.number().optional(),
+      output_tokens: z.number().optional(),
+      total_tokens: z.number().optional(),
+    }).optional(),
   }).safeParse(payload);
   if (!parsed.success)
     throw new UserFacingError("The provider returned an unreadable image. Try again later.");
@@ -253,6 +270,38 @@ async function generateSvg(job: Job, key: string, size: `${number}x${number}` | 
   } catch {
     throw new UserFacingError("The provider returned an unreadable image. Try again later.");
   }
+  if (!bytes.length) throw new UserFacingError("The provider returned an unreadable image. Try again later.");
+  const usage = parsed.data.usage;
+  return {
+    bytes,
+    usage: {
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      totalTokens: usage?.total_tokens,
+    },
+  };
+}
+
+/** SVG is rejected by the installed SDK schema, and the edits endpoint cannot return it. */
+async function generateSvg(job: Job, key: string, size: `${number}x${number}` | undefined, referenceCount: number) {
+  if (job.provider !== "openai")
+    throw new UserFacingError("SVG output requires an OpenAI image model");
+  if (referenceCount)
+    throw new UserFacingError("SVG output cannot be combined with reference images.");
+  if (!size) throw new UserFacingError("SVG output requires a pixel size.");
+  const [width, height] = size.split("x").map(Number);
+  if (!width || !height) throw new UserFacingError("SVG output requires a pixel size.");
+  const body = {
+    model: job.model,
+    prompt: job.prompt,
+    n: 1,
+    size,
+    output_format: "svg",
+    ...(job.quality ? { quality: job.quality } : {}),
+    ...(job.complexity ? { complexity: job.complexity } : {}),
+    ...(job.transparent ? { background: "transparent" } : {}),
+  };
+  const { bytes } = await postImageRequest("https://api.openai.com/v1/images/generations", key, body);
   if (!bytes.length || !svgDocument(bytes))
     throw new UserFacingError("The provider returned an unreadable image. Try again later.");
   return {

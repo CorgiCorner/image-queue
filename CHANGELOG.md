@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 - 2026-11-22
+
+- Use an image attached to the chat as a reference: `upload_reference` shows a card in Claude where you choose, drop or paste the image on a computer or phone, and the card sends the reference ID back. Claude cannot pass a chat attachment to a tool, and the hosted server cannot read local paths.
+- GIF requests accept reference images. They are sent to the OpenAI edits endpoint with the frame settings, and the next version of such a GIF keeps the original's references.
+- A hosted server cannot scale an animated GIF, so a GIF request whose size the model does not render natively is refused before submission, with the size to request instead (for example 608x1088 for a tall GIF of up to 12 frames). Locally such GIFs are still scaled.
+- A blocked job whose generated file was saved can be previewed with `view_image` and downloaded from the job view, as the web panel already allowed.
+- The Cloudflare generation queue runs up to 20 jobs at once instead of 4.
+
 ## 0.2.0 — 2026-11-20
 
 - Deploy image-queue to your own Cloudflare account with `pnpm cloudflare:setup`: D1, R2, a generation queue, a custom domain, Cloudflare Access with Managed OAuth and the Worker secrets in one repeatable command. See [docs/cloudflare.md](docs/cloudflare.md) and [ADR-0020](docs/decisions/0020-remote-mcp-behind-cloudflare-access.md).

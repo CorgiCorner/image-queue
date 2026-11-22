@@ -139,6 +139,6 @@ node scripts/cloudflare-acceptance.mjs
 ## Limits
 
 - The Codex file queue and its local workers cannot run on Cloudflare. Cloud jobs use the API.
-- `add_reference` reads local files, so it does not work against the hosted endpoint. Upload references in the panel instead.
+- `add_reference` reads local files, so it does not work against the hosted endpoint. Claude also cannot pass an image attached to the chat to a tool. Ask Claude to use a reference instead: it calls `upload_reference`, which shows a card where you choose, drop or paste the image on a computer or phone. The card uploads it, scaling photos over 3 MB down to 2048 px, and sends the reference ID back to Claude.
 - The hosted MCP endpoint is stateless. It always lists the MCP Apps views (request, image and gallery), because it never sees the client's initialize request.
 - All allowed users share one workspace.

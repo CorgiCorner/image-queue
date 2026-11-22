@@ -1,5 +1,5 @@
 import { workersOfflineMessage } from "../../core/workspace-state";
-import { isReserved, jobStatusLabels } from "../../core/job-status";
+import { hasSavedResult, isReserved, jobStatusLabels } from "../../core/job-status";
 import type { Job } from "../../core/schema";
 import {
   CompactApp,
@@ -191,7 +191,7 @@ function render(result: { content?: unknown[] }) {
     return;
   }
   if (id !== job.id) started = Date.now();
-  if (id !== job.id || job.trashedAt || job.status !== "done") {
+  if (id !== job.id || job.trashedAt || !hasSavedResult(job)) {
     previewId = "";
     if (play) play.hidden = true;
     const element = document.querySelector<HTMLImageElement>("#preview");
@@ -222,7 +222,7 @@ function render(result: { content?: unknown[] }) {
   id = job.id;
   document.body.dataset.status = job.trashedAt ? "trashed" : job.status;
   if (openApp) openApp.hidden = !document.body.dataset.dashboard;
-  if (download) download.hidden = job.status !== "done" || Boolean(job.trashedAt);
+  if (download) download.hidden = !hasSavedResult(job) || Boolean(job.trashedAt);
   const reserved = isReserved(job);
   const statusLabel = reserved ? "Reserved" : jobStatusLabels[job.status as Job["status"]];
   const label = job.source === "queue" && job.status === "running" && Number.isSafeInteger(job.workerSlot) && job.workerSlot > 0
@@ -245,7 +245,7 @@ function render(result: { content?: unknown[] }) {
     if (jobChanged || pathChanged) copyPath.textContent = "Copy path";
   }
   finished = !["queued", "running"].includes(job.status);
-  if (!job.trashedAt && job.status === "done" && previewId !== id) {
+  if (!job.trashedAt && hasSavedResult(job) && previewId !== id) {
     previewId = id;
     const requestedId = id;
     const isGif = job.outputFormat === "gif";

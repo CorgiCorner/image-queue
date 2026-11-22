@@ -102,6 +102,9 @@ export class CompactApp {
   openLink(params: Parameters<SdkApp["openLink"]>[0]) {
     return this.request<Awaited<ReturnType<SdkApp["openLink"]>>>("ui/open-link", params);
   }
+  sendMessage(params: Parameters<SdkApp["sendMessage"]>[0]) {
+    return this.request<Awaited<ReturnType<SdkApp["sendMessage"]>>>("ui/message", params);
+  }
   updateModelContext(params: Parameters<SdkApp["updateModelContext"]>[0]) {
     return this.request<Awaited<ReturnType<SdkApp["updateModelContext"]>>>("ui/update-model-context", params);
   }

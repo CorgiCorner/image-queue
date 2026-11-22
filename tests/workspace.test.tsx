@@ -3166,8 +3166,9 @@ it("offers API quality, complexity, format and count, and blocks conflicting for
   fireEvent.click(screen.getByRole("checkbox", { name: "Transparent" }));
   fireEvent.click(screen.getByRole("button", { name: "Attach image reference" }));
   fireEvent.click(await screen.findByRole("button", { name: "panda.png" }));
-  expect(formatOption("gif").disabled).toBe(true);
-  expect(screen.getByText(/GIF output with reference images is not supported/)).toBeTruthy();
+  expect(formatOption("gif").disabled).toBe(false);
+  expect(formatOption("svg").disabled).toBe(true);
+  expect(screen.getByText("SVG output cannot be combined with reference images.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "panda.png" }));
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   fireEvent.change(screen.getByLabelText("Quality"), { target: { value: "xhigh" } });

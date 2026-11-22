@@ -1,4 +1,4 @@
-import { GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI } from "../src/mcp/apps";
+import { GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI, REFERENCE_VIEW_URI } from "../src/mcp/apps";
 import { expect, it, vi } from "vitest";
 import { DELETE, POST } from "../src/app/api/mcp/route";
 import { syntheticAccess } from "./access-fixture";
@@ -32,7 +32,7 @@ it("preserves negotiated MCP Apps resources across authenticated HTTP requests",
     expect((await send({ method: "notifications/initialized" }, session!)).status).toBe(202);
     const resources = await send({ id: 2, method: "resources/list" }, session!);
     expect((await resources.json()).result.resources.map((resource: { uri: string }) => resource.uri).sort())
-      .toEqual([GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI]);
+      .toEqual([GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI, REFERENCE_VIEW_URI].sort());
     const unauthorized = await POST(new Request(url, {
       method: "POST", headers: { "mcp-session-id": session! },
     }));
