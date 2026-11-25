@@ -1,4 +1,5 @@
 import {UserFacingError} from './user-facing-error';
+import {LocalGenerationError} from './local-generation-error';
 import {LocalWorkerPool} from './local-worker-pool';
 import type {JobSource,RunnerCapability,RunnerResult,ClaimedJob} from './job-source';
 export interface ExecutorJob {id:string}
@@ -53,7 +54,11 @@ export function createLocalExecutor<T extends ExecutorJob>(options:{
   },
   uncertain:async(work,error)=>{
    await options.generation.uncertain?.(work.id,error);
-   await options.source.fail(work.id,work.claim.leaseId,{code:'execution_interrupted',message:error instanceof UserFacingError ? error.message : 'Generation did not complete locally. Verify the result before retrying.',uncertain:true});
+   await options.source.fail(work.id,work.claim.leaseId,{
+    code:error instanceof LocalGenerationError?error.code:'execution_interrupted',
+    message:error instanceof UserFacingError?error.message:'Generation did not complete locally. Verify the result before retrying.',
+    uncertain:error instanceof LocalGenerationError?error.uncertain:true,
+   });
   },
   report:options.report,blocked:options.blocked,failed:options.failed,
  });

@@ -9,6 +9,7 @@ import {poolConfig,savePoolConfig} from '../core/pool';
 import {pathSettings} from '../core/paths';
 import {createLocalExecutor} from '../core/local-executor';
 import {recoverLocalAttempts} from '../core/local-worker-attempt';
+import {LocalGenerationError} from '../core/local-generation-error';
 import {queueWorkerSource} from './queue-worker-source';
 import {localGeneration} from './local-generation';
 import {prepareLocalQueue} from './prepare-local-queue';
@@ -126,7 +127,8 @@ export async function startLocalRunner(store:Storage):Promise<LocalRunner|undefi
     const settings=await sourceControls(store,'queue');
     armResume(!settings.paused?settings.resumeAt:undefined);
    },
-   report:error=>console.error('Local image execution requires attention.',error instanceof Error?`${error.name}: ${error.message}`:''),
+   report:error=>console.error('Local image execution requires attention.',
+    error instanceof LocalGenerationError?error.code:error instanceof Error?`${error.name}: ${error.message}`:''),
   });
   stopWatching=watchQueue(paths.queueDirectory,()=>executor?.wake());
   paused=paused||await globalPause(store);

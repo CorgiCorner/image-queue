@@ -4,6 +4,7 @@ import {join} from 'node:path';
 import {afterEach,expect,it} from 'vitest';
 import {runCodexAppServer} from '../src/storage/codex-app-server';
 const roots:string[]=[];
+const finalReport='The tool rejected `referenced_image_paths`: must contain at most 5 paths. '+'x'.repeat(300)+' Unlogged tail.';
 afterEach(async()=>{await Promise.all(roots.splice(0).map(r=>rm(r,{recursive:true,force:true})));});
 async function fixture(mode='ok'){
  const root=await mkdtemp(join(tmpdir(),'iq-server-test-'));roots.push(root);
@@ -21,6 +22,12 @@ if(x.method==='turn/start'){
 if(${JSON.stringify(mode)}==='hang'){require('node:fs').writeFileSync(${JSON.stringify(join(root,'turn-started'))},'yes');return;}
 require('node:fs').writeFileSync(${JSON.stringify(join(root,'request'))},x.params.input[0].text);
 const request=JSON.parse(x.params.input[0].text);
+if(${JSON.stringify(mode)}.startsWith('missing-image')){
+emit({method:'item/completed',params:{threadId:'thread',item:{type:'agentMessage',text:'Earlier response sentinel.'}}});
+if(${JSON.stringify(mode)}==='missing-image-started')emit({method:'item/started',params:{threadId:'thread',item:{type:'imageGeneration',status:'inProgress'}}});
+emit({method:'item/completed',params:{threadId:'thread',item:{type:'agentMessage',text:${JSON.stringify(finalReport)}}}});
+emit({method:'turn/completed',params:{threadId:'thread',turn:{status:'completed'}}});return;
+}
 emit({method:'item/completed',params:{threadId:'thread',item:{type:'imageGeneration',status:'completed',savedPath:${JSON.stringify(image)},revisedPrompt:${mode==='rewrite'?'"changed"':'request.imageRequest'},inputImages:${mode==='wrong-hash'?`[{path:${JSON.stringify(image)},sha256:'0'.repeat(64)}]`:'[]'}}}});
 emit({method:'turn/completed',params:{threadId:'thread',turn:{status:'completed'}}});}
 });`);await chmod(executable,0o700);
@@ -43,6 +50,28 @@ it('uses a read-only thread, disables inherited tools and collects verified even
  expect(config.developerInstructions).toContain('never append dimensions');
 });
 it('rejects effective external tools before starting a generation',async()=>{await expect(run('tools')).rejects.toThrow('External generation tools');});
+it('records a definite failure and truncated final message when generation never starts',async()=>{
+ const f=await fixture('missing-image');
+ const eventLog=join(f.root,'events');
+ await expect(runCodexAppServer({executable:f.executable,request:{workspace:f.root,output:join(f.root,'out.png'),prompt:'private prompt sentinel',references:[],model:'gpt-6.1-sol',effort:'low'},signal:new AbortController().signal,eventLog,errorLog:join(f.root,'errors'),onStarted:async()=>{},timeoutMs:3000})).rejects.toMatchObject({
+  code:'missing_image',uncertain:false,message:expect.stringContaining(finalReport.slice(0,300)),
+ });
+ const content=await readFile(eventLog,'utf8');
+ expect(content.trim().split('\n').map(row=>JSON.parse(row)).at(-1)).toMatchObject({
+  event:'attempt_failed',code:'missing_image',imageGenerationStarted:false,reportedHint:'reference_limit',
+  finalAgentMessage:finalReport.slice(0,300),
+ });
+ expect(content).not.toMatch(/private prompt sentinel|Earlier response sentinel|Unlogged tail/i);
+});
+it('keeps the result uncertain if an imageGeneration item started',async()=>{
+ await expect(run('missing-image-started')).rejects.toMatchObject({code:'missing_image',uncertain:true});
+});
+it('rejects six references before starting Codex',async()=>{
+ await expect(run('ok',Array.from({length:6},(_,i)=>`/ref-${i}.png`))).rejects.toMatchObject({
+  code:'reference_limit',uncertain:false,message:expect.stringContaining('at most 5 reference images (got 6)'),
+ });
+ await expect(readFile(join(roots.at(-1)!,'config'))).rejects.toMatchObject({code:'ENOENT'});
+});
 it('rejects actual rewritten prompts',async()=>{await expect(run('rewrite')).rejects.toThrow('changed');});
 it('rejects an output outside the private directory before launching',async()=>{
  const f=await fixture();await expect(runCodexAppServer({executable:f.executable,request:{workspace:f.root,output:join(tmpdir(),'outside.png'),prompt:'x',references:[],model:'gpt-6.1-sol',effort:'low'},signal:new AbortController().signal,eventLog:join(f.root,'events'),errorLog:join(f.root,'errors'),onStarted:async()=>{}})).rejects.toThrow('private run');

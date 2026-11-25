@@ -1,7 +1,7 @@
 import { GALLERY_VIEW_URI, IMAGE_VIEW_URI, JOB_VIEW_URI } from "../src/mcp/apps";
 import { png, mp4 } from "./fixtures";
 import { service } from "../src/core/runtime";
-import { mkdtemp, rm, writeFile, mkdir, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/client";
@@ -721,6 +721,31 @@ it("rejects non-OpenAI requests before creating a job in 0.1.0", async () => {
     })).rejects.toThrow("supports OpenAI only");
   }
   expect(await call("list_jobs")).toEqual([]);
+});
+
+it("blocks six local Codex references and accepts five", async () => {
+  const api = await service();
+  const project = await api.createProject("Reference limit");
+  const referenceIds: string[] = [];
+  for (let index = 0; index < 6; index++) {
+    const reference = await api.addReference(project.id, `ref-${index}.png`, "image/png", png);
+    referenceIds.push(reference.id);
+  }
+  const input = { projectId: project.id, prompt: "A blue square", width: 1024, height: 1024, source: "queue" };
+  const blocked = await call("request_image", { ...input, idempotencyKey: "six-references", referenceIds });
+  expect(blocked).toMatchObject({status:"blocked", error:expect.stringContaining("at most 5 reference images (got 6)")});
+  expect(blocked.outputPath).toBeUndefined();
+  expect(await call("request_images", { requests: [{ ...input, idempotencyKey: "six-references", referenceIds }] })).toEqual([blocked]);
+  await expect(call("retry_image", { id: blocked.id })).rejects.toThrow("at most 5 reference images");
+  const accepted = await call("request_image", { ...input, idempotencyKey: "five-references", referenceIds: referenceIds.slice(0, 5) });
+  expect(accepted.status).toBe("queued");
+  const queue = await readFile(path.join(root, "queue", "images-todo.md"), "utf8");
+  expect(queue).toContain(accepted.id);
+  expect(queue).not.toContain(blocked.id);
+  expect(await api.create({
+    ...input, idempotencyKey:"six-api-references", source:"api", provider:"openai",
+    model:"test-model", transparent:false, referenceIds,
+  })).toMatchObject({status:"queued",referenceIds});
 });
 
 it("tells agents the reference formats before they submit a request", async () => {

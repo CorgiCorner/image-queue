@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-11-25
+
+- Local Codex jobs accept up to five reference images. Requests with more references are blocked before generation.
+- A completed Codex turn that never started image generation is marked failed. Missing-image errors include a short excerpt from the final Codex response.
+
 ## 0.2.1 - 2026-11-22
 
 - Use an image attached to the chat as a reference: `upload_reference` shows a card in Claude where you choose, drop or paste the image on a computer or phone, and the card sends the reference ID back. Claude cannot pass a chat attachment to a tool, and the hosted server cannot read local paths.

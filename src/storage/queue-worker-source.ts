@@ -6,6 +6,8 @@ import path from 'node:path';
 import type {Storage} from './types';
 import {RejectedQueueRequest} from '../core/local-worker-pool';
 import {LocalJobSource,type LocalSourceHooks} from '../core/local-job-source';
+import {codexReferenceLimitError} from '../core/local-generation-error';
+import type {LocalAttempt} from '../core/local-worker-attempt';
 import type {LocalGenerationJob} from './local-generation';
 import type {RunnerResult} from '../core/job-source';
 import {hash,type Job} from '../core/schema';
@@ -48,7 +50,7 @@ export function queueWorkerSource(store:Storage,options:{queueRoot:string;worker
     } else if(!owner&&!excluded.has(row.id)&&!claims.has(row.id)){
      const pointer=await store.get<string>('attempt-by-job',row.id);
      const attempt=pointer && await store.get<{startedAt?:string;state:string}>('local-attempts',pointer);
-     if(!attempt || (!attempt.startedAt && attempt.state!=='uncertain'))owner=row.worker;
+     if(!attempt || (!attempt.startedAt && attempt.state!=='uncertain' && attempt.state!=='failed'))owner=row.worker;
     }
    }
   })()]);
@@ -63,8 +65,10 @@ export function queueWorkerSource(store:Storage,options:{queueRoot:string;worker
    const claim=await helper(['claim','--worker',claimOwner]) as Claim&{job?:null};
    if(claim.job===null)return null;
    if((claim.already_owned&&!selection.owner)||excluded.has(claim.id))throw new Error('Existing reservation requires recovery; automatic generation refused');
-   if(!claim.generation.ready){
-    const message=claim.generation.error??'Invalid request';
+   const message=claim.generation.ready
+    ? codexReferenceLimitError(claim.generation.referencePaths.length)
+    : claim.generation.error??'Invalid request';
+   if(message){
     await helper(['finish','--worker',claim.worker,'--id',claim.id,'--token',claim.token,'--status','blocked','--reason',message]);
     const job=await store.get<Job>('jobs',claim.id);
     if(job)await store.put('jobs',claim.id,{...job,status:'blocked',error:message,updatedAt:new Date().toISOString()});
@@ -92,21 +96,40 @@ export function queueWorkerSource(store:Storage,options:{queueRoot:string;worker
    }
    claims.delete(id);
   },
+  async recordedFailure(id){
+   const pointer=await store.get<string>('attempt-by-job',id);
+   const attempt=pointer?await store.get<LocalAttempt>('local-attempts',pointer):undefined;
+   if(attempt?.state==='failed'&&attempt.error)return {code:'recorded_failure',message:attempt.error,uncertain:false};
+  },
   async fail(id,error){
-   claims.delete(id);
-   // Retain the protocol reservation: uncertainty never makes it available twice.
    const job=await store.get<Job>('jobs',id);
-   if(job?.status==='done')return;
+   if(job?.status==='done'){claims.delete(id);return;}
    if(job?.outputPath){
     const observed=await (await queueInspector(options.queueRoot))(job);
     // The helper validates delivery and receipt before committing done. A crash
     // between that commit and our metadata write must preserve the delivered image.
     if(observed.status==='done' && observed.generatedSize){
      await store.put('jobs',id,{...job,...observed,claim:undefined,error:undefined,updatedAt:new Date().toISOString()});
+     claims.delete(id);
      return;
     }
    }
-   if(job)await store.put('jobs',id,{...job,status:error.uncertain?'uncertain':'failed',error:error.message,updatedAt:new Date().toISOString()});
+   if(!error.uncertain){
+    let claim:Pick<Claim,'worker'|'token'>|undefined=claims.get(id);
+    if(error.code==='recorded_failure'){
+     const rows=await helper(['list']) as {id:string;reservation?:{worker:string;token:string;state:string}}[];
+     const reservation=rows.find(row=>row.id===id)?.reservation;
+     claim=reservation?.state==='reserved'&&reservation.worker.startsWith('local:')?reservation:undefined;
+    }
+    if(claim){
+     const reason=error.code==='reference_limit'?error.message:'Codex did not start image generation.';
+     await helper(['finish','--worker',claim.worker,'--id',id,'--token',claim.token,'--status','blocked','--reason',reason]);
+    }
+   }
+   // An ambiguous result keeps its protocol reservation.
+   if(job)await store.put('jobs',id,{...job,status:error.uncertain?'uncertain':'failed',error:error.message,
+    ...(!error.uncertain?{claim:undefined}:{}),updatedAt:new Date().toISOString()});
+   claims.delete(id);
   },
  };
  return Object.assign(new LocalJobSource(store,hooks),{hasPending});
