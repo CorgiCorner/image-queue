@@ -15,6 +15,7 @@ import { createSafeActionClient } from "next-safe-action";
 import { z } from "zod";
 import { verifyAccess } from "@/core/access";
 import { localRequestDenied } from "@/core/local-request";
+import { localQueueReferenceLimitError } from "@/core/local-generation-error";
 import { poolSchema, savePoolConfig } from "@/core/pool";
 import { requestsForCount } from "@/core/request-count";
 import { dispatch, enqueue, retryBlockedQueueJob, retryImageJob, service } from "@/core/runtime";
@@ -70,6 +71,10 @@ export const requestImageAction = action
   .inputSchema(requestSchema.extend({ count: z.number().int().min(1).max(10).optional() }))
   .action(async ({ parsedInput }) => {
     const { count, ...request } = parsedInput;
+    if (request.source === "queue" && configuration("STORAGE_DRIVER") !== "cloudflare") {
+      const referenceError = localQueueReferenceLimitError(request.referenceIds.length);
+      if (referenceError) throw new UserFacingError(referenceError);
+    }
     const expanded = requestsForCount(request, count ?? 1).map(item => requestSchema.parse(item));
     const api = await service();
     if (request.source === "api") {

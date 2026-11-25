@@ -29,6 +29,10 @@ for line in sys.stdin:
  emit({'id':i,'result':result})
  if m=='turn/start':
   request=json.loads(x['params']['input'][0]['text'])
+  if request['imageRequest']=='A missing image':
+   emit({'method':'item/completed','params':{'threadId':'fixture','item':{'type':'agentMessage','text':'The image tool rejected the attachment.'}}})
+   emit({'method':'turn/completed','params':{'threadId':'fixture','turn':{'status':'completed'}}})
+   continue
   folder=os.path.join(os.environ['CODEX_HOME'],'generated_images','fixture');os.makedirs(folder,exist_ok=True)
   out=os.path.join(folder,'image.png');shutil.copyfile(${JSON.stringify(seed)},out)
   emit({'method':'item/completed','params':{'threadId':'fixture','item':{'type':'imageGeneration','status':'completed','revisedPrompt':request['imageRequest'],'savedPath':out,'inputImages':[]}}})
@@ -36,13 +40,35 @@ for line in sys.stdin:
 `);await chmod(executable,0o700);
  vi.stubEnv('CODEX_HOME',join(root,'codex'));vi.stubEnv('IMAGE_QUEUE_EXECUTOR','local');vi.stubEnv('IMAGE_QUEUE_STORAGE_DIR',join(root,'store'));vi.stubEnv('IMAGE_QUEUE_CODEX_BIN',executable);
  const store=new FileStorage(join(root,'store'));await store.put('settings','paths',{queueDirectory:queue,referenceDirectories:[root]});await store.put('settings','worker-pool',{workers:1,idleMinutes:5,activeMinutes:1,activityWindowMinutes:10});await store.put('settings','local-runner',{workers:1});
- const job={id:'IMG-lifecycle',idempotencyKey:'lifecycle',projectId:'project',prompt:'A blue square',source:'queue',provider:'openai',model:'',width:32,height:32,transparent:false,referenceIds:[],status:'queued',requestHash:'hash',createdAt:new Date().toISOString()} as unknown as Job;await appendQueue(queue,job,[]);await store.put('jobs',job.id,job);
+ const job={id:'IMG-lifecycle',idempotencyKey:'lifecycle',projectId:'project',prompt:'A blue square',source:'queue',provider:'openai',model:'',width:32,height:32,transparent:false,referenceIds:[],status:'queued',requestHash:'hash',createdAt:new Date().toISOString()} as unknown as Job;
+ const oversized={...job,id:'IMG-oversized',idempotencyKey:'oversized'};
+ const missing={...job,id:'IMG-missing-image',idempotencyKey:'missing-image',prompt:'A missing image'};
+ const references=Array.from({length:6},(_,i)=>join(root,`ref-${i}.png`));
+ await Promise.all(references.map(file=>copyFile(seed,file)));
+ for(const request of [oversized,missing,job]){
+  await appendQueue(queue,request,request===oversized?references:[]);
+  await store.put('jobs',request.id,request);
+ }
  const runner=await startLocalRunner(store);
  try {
-  await vi.waitFor(async()=>{expect(runner?.status().blockedReason).toBeUndefined();const entries=parseQueue(await readFile(join(queue,'images-todo.md'),'utf8'));expect(entries[0].status).toBe('done');},{timeout:25000});
+  await vi.waitFor(async()=>{
+   expect(runner?.status().blockedReason).toBeUndefined();
+   const entries=parseQueue(await readFile(join(queue,'images-todo.md'),'utf8'));
+   expect(entries.map(entry=>entry.status)).toEqual([
+    expect.stringContaining('blocked: Local Codex accepts at most 5 reference images (got 6)'),
+    'blocked: Codex did not start image generation.','done',
+   ]);
+  },{timeout:25000});
   expect((await store.get<any>('settings','worker-pool')).workers).toBe(0);
   await expect(startLocalRunner(store)).rejects.toThrow('operation is in progress');
-  await vi.waitFor(async()=>expect((await store.list<any>('local-attempts'))[0].state).toBe('succeeded'),{timeout:10000});
+  await vi.waitFor(async()=>expect(await store.list('local-attempts')).toEqual(expect.arrayContaining([
+   expect.objectContaining({jobId:job.id,state:'succeeded'}),
+   expect.objectContaining({jobId:missing.id,state:'failed'}),
+  ])),{timeout:10000});
+  const attempts=await store.list<{jobId:string}>('local-attempts');
+  expect(attempts).toHaveLength(2);
+  expect(await store.get('jobs',oversized.id)).toMatchObject({status:'blocked'});
+  expect(await store.get('jobs',missing.id)).toMatchObject({status:'failed',error:expect.stringContaining('The image tool rejected the attachment.')});
   const next={...job,id:'IMG-external',idempotencyKey:'external'};await store.put('jobs',next.id,next);await appendQueue(queue,next,[]);
   await vi.waitFor(async()=>{expect(parseQueue(await readFile(join(queue,'images-todo.md'),'utf8')).find(j=>j.id===next.id)?.status).toBe('done');},{timeout:25000});
  } finally {await runner?.stop();}

@@ -10,6 +10,7 @@ import type { Job, Model, Reference } from "./schema";
 import { ImageService } from "./service";
 import { readKey } from "./settings";
 import { queueUnavailableMessage } from "./generation-preference";
+import { localQueueReferenceLimitError } from "./local-generation-error";
 export async function service() {
   const store = await storage();
   try {
@@ -35,6 +36,8 @@ export async function retryBlockedQueueJob(id: string, acknowledgeUncertain = fa
     const original = await api.store.get<Job>("jobs", id);
     if (!original || !["blocked", "uncertain", "failed"].includes(original.status) || original.source !== "queue" || original.archivedAt || original.trashedAt)
       throw new UserFacingError("Select a blocked or interrupted Codex queue request");
+    const referenceError = localQueueReferenceLimitError(original.referenceIds?.length ?? 0);
+    if (referenceError) throw new UserFacingError(referenceError);
     if(original.status === "uncertain" && !acknowledgeUncertain)throw new UserFacingError("The original worker may have generated an image. Confirm before sending again.");
     const { pathSettings } = await import("./paths");
     const { hash } = await import("./schema");
@@ -46,6 +49,8 @@ export async function retryBlockedQueueJob(id: string, acknowledgeUncertain = fa
       settings.referenceDirectories,
       original.status !== "blocked",
     );
+    const pathLimitError = localQueueReferenceLimitError(references.length);
+    if (pathLimitError) throw new UserFacingError(pathLimitError);
     const job = await api.create({
       ...request,
       projectId: original.projectId,
@@ -162,6 +167,11 @@ export async function executeImageJob(id: string, store: Storage,
       if (job.outputPath) return;
       if (configuration("STORAGE_DRIVER") === "cloudflare")
         throw new UserFacingError(queueUnavailableMessage);
+      const referenceError = localQueueReferenceLimitError(job.referenceIds.length);
+      if (referenceError) {
+        await store.put("jobs", id, { ...job, status: "blocked", error: referenceError, updatedAt: new Date().toISOString() });
+        return;
+      }
       await store.lock("path-settings", async () => {
         const { appendQueue, configuredQueueRoot } = await import(
           "../sources/queue"

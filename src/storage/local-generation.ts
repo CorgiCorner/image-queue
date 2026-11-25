@@ -9,6 +9,7 @@ import {prepareLocalAttempt,updateLocalAttempt,recordLocalAttemptFailure} from '
 import {fitImage} from '../sources/image-fit';
 import {hasTransparentPixels} from '../sources/image-opacity';
 import {UserFacingError} from '../core/user-facing-error';
+import {LocalGenerationError} from '../core/local-generation-error';
 import {hash} from '../core/schema';
 import {imageSize} from 'image-size';
 import type {RunnerResult} from '../core/job-source';
@@ -74,7 +75,8 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
       if((copyError as NodeJS.ErrnoException).code!=='ENOENT'){retainedDirectory=attempt.directory;break;}
      }
     }
-    await recordLocalAttemptFailure(store,attempt.id,message,retainedDirectory);
+    const state=error instanceof LocalGenerationError&&!error.uncertain?'failed':'uncertain';
+    await recordLocalAttemptFailure(store,attempt.id,message,retainedDirectory,state);
     throw error;
    }
   },
@@ -82,7 +84,7 @@ export function localGeneration(store:Storage,runRoot:string,executable='codex')
    const a=attempts.get(jobId);
    if(a){
     const current=await store.get<{state:string;error?:string;artifactDirectory?:string}>('local-attempts',a.id);
-    if(current?.state!=='succeeded')await recordLocalAttemptFailure(store,a.id,current?.error ?? (error instanceof UserFacingError ? error.message : 'Local delivery did not complete. Inspect the retained result before retrying.'),current?.artifactDirectory ?? a.archive);
+    if(current?.state!=='succeeded'&&current?.state!=='failed')await recordLocalAttemptFailure(store,a.id,current?.error ?? (error instanceof UserFacingError ? error.message : 'Local delivery did not complete. Inspect the retained result before retrying.'),current?.artifactDirectory ?? a.archive);
    }
    attempts.delete(jobId);
   },

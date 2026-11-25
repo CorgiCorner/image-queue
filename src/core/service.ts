@@ -7,6 +7,7 @@ import { resolveModelSize, resolveQueueSize } from "./size-intent";
 import { createRecordIdentity } from "./replica-identity";
 import { writeMetadata } from "./metadata-operation";
 import { validateReference } from "./reference-validation";
+import { localQueueReferenceLimitError } from "./local-generation-error";
 import type { Storage } from "../storage/types";
 import {
   hash,
@@ -153,6 +154,9 @@ export class ImageService {
         if (profile) assertModelOptions(profile, parsed);
       }
       const now = new Date().toISOString();
+      const referenceError = parsed.source === "queue" && configuration("STORAGE_DRIVER") !== "cloudflare"
+        ? localQueueReferenceLimitError(parsed.referenceIds.length)
+        : undefined;
       const identity = await createRecordIdentity(this.store, "jobs", id);
       const job: Job = {
         ...identity,
@@ -167,7 +171,8 @@ export class ImageService {
         machineId: identity.originMachine,
         createdAt: now,
         updatedAt: now,
-        status: "queued",
+        status: referenceError ? "blocked" : "queued",
+        ...(referenceError ? { error: referenceError } : {}),
       };
       // The job lock serializes this intent with the executor. A crash after the job
       // commit cannot strand it, even if the submitting MCP process exits immediately.

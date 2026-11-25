@@ -6,13 +6,23 @@ import path from 'node:path';
 import os from 'node:os';
 import {z} from 'zod';
 import {UserFacingError} from '../core/user-facing-error';
+import {codexReferenceLimitError,LocalGenerationError} from '../core/local-generation-error';
 import {codexFailureMessage} from '../core/codex-failure';
 import {codexProcessEnvironment} from '../core/codex-generation-command';
 import type {CodexProcessOptions} from './codex-process';
 
 const generated=z.object({type:z.literal('imageGeneration'),status:z.literal('completed'),revisedPrompt:z.string(),savedPath:z.string(),inputImages:z.array(z.object({path:z.string(),sha256:z.string()})).default([])});
+function reportedDiagnostic(text: string) {
+ if(/\bat most\s+\d+\s+paths\b|(?:too many|at most|maximum of|only supports up to)\s+(?:(?:\d+|one|two|three|four|five|six)\s+)?(?:reference images|references|input images)/i.test(text))return 'reference_limit';
+ if(/(?:cannot|can’t|can't|unable to|could not|failed to)\s+(?:attach|read|open|access)\b[^.\n]{0,100}\b(?:reference|image|file)/i.test(text))return 'reference_unavailable';
+ if(/(?:image_gen|image generation tool)\s+(?:is\s+)?(?:not available|unavailable|disabled)/i.test(text))return 'image_tool_unavailable';
+ if(/usage limit|quota exceeded|rate.limit|limit reached|insufficient_quota/i.test(text))return 'usage_limit';
+}
+
 /** A fresh read-only thread; only generator events may provide a result. */
 export async function runCodexAppServer(options:CodexProcessOptions) {
+ const referenceError=codexReferenceLimitError(options.request.references.length);
+ if(referenceError)throw new LocalGenerationError('reference_limit',referenceError,false);
  const workspace=await realpath(options.request.workspace);
  const output=path.resolve(options.request.output);
  if(await realpath(path.dirname(output))!==workspace)throw new Error('Generation output must be inside the private run directory');
@@ -21,6 +31,9 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
  const lines=createInterface({input:child.stdout});
  let fatal:Error|undefined;
  let nextId=1,closed=false,threadId='',image: z.infer<typeof generated>|undefined;
+ let imageGenerationStarted=false;
+ let finalAgentMessage:string|undefined;
+ let finalReportedHint:string|undefined;
  let finishTurn:()=>void=()=>{},failTurn:(error:Error)=>void=()=>{};
  const turn=new Promise<void>((resolve,reject)=>{finishTurn=resolve;failTurn=reject;});
  // Initialization can fail before the caller reaches the turn await.
@@ -45,11 +58,19 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
    if(waiter){pending.delete(message.id);message.error?waiter.reject(new UserFacingError(codexFailureMessage(JSON.stringify(message.error)))):waiter.resolve(message.result);return;}
    if(message.params?.threadId!==threadId)return;
    const item=message.params?.item;
+   if(message.method==='item/started' && item?.type==='imageGeneration'){
+    imageGenerationStarted=true;
+    events.push({event:'item/started',type:'imageGeneration'});
+   }
    if(message.method==='item/completed' && item){
     events.push({type:item.type,status:item.status});
     if(item.type==='imageGeneration'){
+     imageGenerationStarted=true;
      if(image)throw new Error('Multiple image generations are not permitted');
      image=generated.parse(item);
+    } else if(item.type==='agentMessage' && typeof item.text==='string'){
+     finalAgentMessage=item.text.trim().slice(0,300)||undefined;
+     finalReportedHint=reportedDiagnostic(item.text);
     } else if(!['reasoning','agentMessage','userMessage'].includes(item.type))throw new Error(`Unexpected tool executed during image generation: ${String(item.type)}`);
    }
    if(message.method==='turn/completed'){
@@ -83,7 +104,12 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
   await turn;
   if(fatal)throw fatal;
   if(options.signal.aborted)throw new Error('Generation interrupted; result is uncertain');
-  if(!image)throw new UserFacingError('Codex did not return a generated image. Check the attempt before retrying.');
+  if(!image){
+   const reason=imageGenerationStarted
+    ? 'Codex did not return a generated image. Check the attempt before retrying.'
+    : 'Codex did not return a generated image. No imageGeneration item started.';
+   throw new LocalGenerationError('missing_image',finalAgentMessage ? `${reason} Codex reported: ${finalAgentMessage}` : reason,imageGenerationStarted);
+  }
   if(image.revisedPrompt!==options.request.prompt)throw new UserFacingError('Generator changed the requested prompt. The result was not published; inspect the attempt before retrying.');
   if(image.inputImages.length!==options.request.references.length)throw new UserFacingError('Generator omitted reference images. The result was not published; inspect the attempt before retrying.');
   for(let i=0;i<image.inputImages.length;i++){
@@ -98,6 +124,13 @@ export async function runCodexAppServer(options:CodexProcessOptions) {
   await writeFile(options.eventLog,events.map(e=>JSON.stringify(e)).join('\n'),{mode:0o600});
   await writeFile(options.errorLog,'',{mode:0o600});
   return {path:output,pid:child.pid};
+ }catch(error){
+  if(error instanceof LocalGenerationError && error.code==='missing_image'){
+   events.push({event:'attempt_failed',code:error.code,imageGenerationStarted,finalAgentMessage,reportedHint:finalReportedHint});
+   try {await writeFile(options.eventLog,events.map(event=>JSON.stringify(event)).join('\n')+'\n',{mode:0o600});}
+   catch {console.warn('Could not write the local Codex attempt log.');}
+  }
+  throw error;
  }finally{
   clearTimeout(timeout);options.signal.removeEventListener('abort',abort);lines.close();child.stdin.end();stop('SIGTERM');
   if(!closed){const force=setTimeout(()=>stop('SIGKILL'),500);force.unref();child.once('close',()=>clearTimeout(force));}

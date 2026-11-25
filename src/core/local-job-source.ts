@@ -7,6 +7,7 @@ export interface LocalSourceHooks<T extends RunnableJob> {
  next(capabilities:RunnerCapability[], excludedJobIds:ReadonlySet<string>, runnerId:string):Promise<T|null>;
  complete(jobId:string,result:RunnerResult):Promise<void>;
  fail(jobId:string,error:RunnerFailure):Promise<void>;
+ recordedFailure?(jobId:string):Promise<RunnerFailure|undefined>;
 }
 /** One lock orders claims; leased work is never selected twice after an ambiguous run. */
 export class LocalJobSource<T extends RunnableJob> implements JobSource<T> {
@@ -73,8 +74,9 @@ export class LocalJobSource<T extends RunnableJob> implements JobSource<T> {
  private async recoverExpired(leases:Map<string,Lease>,all=false){
   for(const l of leases.values())if(l.state==='active'&&(all||l.expiresAt<=this.now())){
    if(l.startedAt===undefined){await this.store.delete('runner-leases',l.id);leases.delete(l.id);this.excludedIds?.delete(l.jobId);continue;}
-   await this.hooks.fail(l.jobId,{code:'lease_expired',message:'Execution interrupted; verify the result before retrying.',uncertain:true});
-   await this.save({...l,state:'uncertain'});
+   const error=await this.hooks.recordedFailure?.(l.jobId)??{code:'lease_expired',message:'Execution interrupted; verify the result before retrying.',uncertain:true};
+   await this.hooks.fail(l.jobId,error);
+   await this.save({...l,state:error.uncertain?'uncertain':'failed'});
   }
  }
 }
